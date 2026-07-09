@@ -464,7 +464,7 @@ let f=CM.Figure(size=(1300,460))
         CM.scatter!(ax,t,p;color=[g==:circular ? :steelblue : :orange for g in geomtag],markersize=8)
         CM.text!(ax,lo+0.03*(hi-lo),hi-0.05*(hi-lo);text=@sprintf("CCC %.3f\nslope %.2f\nRMSE %.3f\nR² %.3f",mt.ccc,mt.slope,mt.rmse,mt.r2),align=(:left,:top),fontsize=11)
     end
-    CM.Label(f[0,:],"Recovered vs true (per-voxel decode · eroded-core pool) — blue=circular, orange=sector; error bars = SE of the ROI mean";fontsize=12,font=:bold)
+    CM.Label(f[0,:],"Recovered vs true (n=$(length(allrois)): $(count(==(:circular),geomtag)) circular + $(count(==(:sector),geomtag)) sector · per-voxel decode · eroded-core pool) — blue=circular, orange=sector; error bars = SE of the ROI mean";fontsize=12,font=:bold)
     safe_save(joinpath(ASSET,"fig5_scatter.png"),f); f
 end
 
@@ -493,41 +493,43 @@ let f=CM.Figure(size=(1520,430))
 end
 
 # ╔═╡ aaaa0023-0000-4000-8000-000000000023
-# GT vs recovered vs |error| for ALL THREE materials, everything on ONE jet 0–1 scale (|error| on the same
-# 0–1 scale reads honestly small vs the fraction range). Circular phantom.
-let f=CM.Figure(size=(1150,1050)), Dl=circ
+# GT vs recovered (jet 0–1) vs signed error (blue–white–red diverging, own colorbar) for ALL THREE materials.
+# Circular phantom.
+let f=CM.Figure(size=(1320,1050)), Dl=circ
     hi=findall(!isnan,Dl.tru[:,:,2]); ci=extrema(getindex.(hi,1)); cj=extrema(getindex.(hi,2)); pad=25
     rI=max(1,ci[1]-pad):min(size(Dl.tru,1),ci[2]+pad); rJ=max(1,cj[1]-pad):min(size(Dl.tru,2),cj[2]+pad)
     for (row,mat) in enumerate(("f_w","f_l","f_p"))
         tl=Dl.tru[rI,rJ,row]; rf=Dl.rec[rI,rJ,row]
         rl=[isnan(tl[i,j]) ? NaN : rf[i,j] for i in axes(tl,1),j in axes(tl,2)]
-        er=[isnan(tl[i,j]) ? NaN : abs(rf[i,j]-tl[i,j]) for i in axes(tl,1),j in axes(tl,2)]
-        for (col,(img,ttl)) in enumerate(((tl,"true"),(rl,"recovered"),(er,"|error|")))
+        er=[isnan(tl[i,j]) ? NaN : rf[i,j]-tl[i,j] for i in axes(tl,1),j in axes(tl,2)]
+        for (col,(img,ttl,cm,cr)) in enumerate(((tl,"true",:jet,(0,1)),(rl,"recovered",:jet,(0,1)),(er,"error",CM.Reverse(:RdBu),(-0.15,0.15))))
             ax=CM.Axis(f[row,col];title=(row==1 ? ttl : ""),ylabel=(col==1 ? mat : ""),aspect=CM.DataAspect(),yreversed=true)
-            CM.hidedecorations!(ax;label=false); CM.heatmap!(ax,img;colormap=:jet,colorrange=(0,1))
+            CM.hidedecorations!(ax;label=false); CM.heatmap!(ax,img;colormap=cm,colorrange=cr)
         end
     end
-    CM.Colorbar(f[:,4];colormap=:jet,colorrange=(0,1),label="fraction (true/recovered) · |error| on the same 0–1 scale")
-    CM.Label(f[0,:],"Circular phantom — true vs recovered (per-voxel+TV) vs |error|, f_w / f_l / f_p, all jet on 0–1";fontsize=13,font=:bold)
+    CM.Colorbar(f[:,4];colormap=:jet,colorrange=(0,1),label="fraction (true / recovered)")
+    CM.Colorbar(f[:,5];colormap=CM.Reverse(:RdBu),colorrange=(-0.15,0.15),label="error (recovered − true)")
+    CM.Label(f[0,:],"Circular phantom — true & recovered (jet 0–1) vs error (blue–white–red), f_w / f_l / f_p";fontsize=13,font=:bold)
     safe_save(joinpath(ASSET,"fig8_gt_rec_error_circular.png"),f); f
 end
 
 # ╔═╡ aaaa0024-0000-4000-8000-000000000024
 # Same triad for the SECTOR validation phantom (held-out shape).
-let f=CM.Figure(size=(1150,1050)), Dl=sect
+let f=CM.Figure(size=(1320,1050)), Dl=sect
     hi=findall(!isnan,Dl.tru[:,:,2]); ci=extrema(getindex.(hi,1)); cj=extrema(getindex.(hi,2)); pad=25
     rI=max(1,ci[1]-pad):min(size(Dl.tru,1),ci[2]+pad); rJ=max(1,cj[1]-pad):min(size(Dl.tru,2),cj[2]+pad)
     for (row,mat) in enumerate(("f_w","f_l","f_p"))
         tl=Dl.tru[rI,rJ,row]; rf=Dl.rec[rI,rJ,row]
         rl=[isnan(tl[i,j]) ? NaN : rf[i,j] for i in axes(tl,1),j in axes(tl,2)]
-        er=[isnan(tl[i,j]) ? NaN : abs(rf[i,j]-tl[i,j]) for i in axes(tl,1),j in axes(tl,2)]
-        for (col,(img,ttl)) in enumerate(((tl,"true"),(rl,"recovered"),(er,"|error|")))
+        er=[isnan(tl[i,j]) ? NaN : rf[i,j]-tl[i,j] for i in axes(tl,1),j in axes(tl,2)]
+        for (col,(img,ttl,cm,cr)) in enumerate(((tl,"true",:jet,(0,1)),(rl,"recovered",:jet,(0,1)),(er,"error",CM.Reverse(:RdBu),(-0.15,0.15))))
             ax=CM.Axis(f[row,col];title=(row==1 ? ttl : ""),ylabel=(col==1 ? mat : ""),aspect=CM.DataAspect(),yreversed=true)
-            CM.hidedecorations!(ax;label=false); CM.heatmap!(ax,img;colormap=:jet,colorrange=(0,1))
+            CM.hidedecorations!(ax;label=false); CM.heatmap!(ax,img;colormap=cm,colorrange=cr)
         end
     end
-    CM.Colorbar(f[:,4];colormap=:jet,colorrange=(0,1),label="fraction (true/recovered) · |error| on the same 0–1 scale")
-    CM.Label(f[0,:],"Sector phantom — true vs recovered (per-voxel+TV) vs |error|, f_w / f_l / f_p, all jet on 0–1";fontsize=13,font=:bold)
+    CM.Colorbar(f[:,4];colormap=:jet,colorrange=(0,1),label="fraction (true / recovered)")
+    CM.Colorbar(f[:,5];colormap=CM.Reverse(:RdBu),colorrange=(-0.15,0.15),label="error (recovered − true)")
+    CM.Label(f[0,:],"Sector phantom — true & recovered (jet 0–1) vs error (blue–white–red), f_w / f_l / f_p";fontsize=13,font=:bold)
     safe_save(joinpath(ASSET,"fig9_gt_rec_error_sector.png"),f); f
 end
 
