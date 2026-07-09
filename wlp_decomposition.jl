@@ -281,25 +281,30 @@ begin
     # one packed-thorax acquisition → NHEART eroded insert cores (shared by calibration + circular test)
     _cores(seed, cseed) = begin
         comps = diverse_comps(cseed, NHEART); ph = build_thorax(comps); acq = run_acq(ph.gpu; seed=seed)
-        lc = Dict(ROD0-1+k => comps[k] for k in 1:NHEART); r = collect_rois(acq, ph.cpu, lc; radius_px=CORE_RPX).rois; ph=nothing; GC.gc(true); r
+        lc = Dict(ROD0-1+k => comps[k] for k in 1:NHEART); r = collect_rois(acq, ph.cpu, lc; radius_px=CORE_RPX).rois
+        mid = size(acq.hu70,3)÷2+1                                    # keep the mid-slice CT for raw export (shared geometry ⇒ map_m2 labels)
+        img = (; seed, hu40=Array(acq.hu40[:,:,mid]), hu70=Array(acq.hu70[:,:,mid]), comps)
+        ph=nothing; GC.gc(true); (rois=r, img=img)
     end
     # ── calibration (4 sims) + delivered-map thorax ──
     if !isfile(CACHE)
         println("── running calibration + map thorax ──"); Random.seed!(1)
-        calrois = NamedTuple[]; for (si,seed) in enumerate((11,12,13,14)); append!(calrois, _cores(seed, 1000+si)); end
+        calrois = NamedTuple[]; calsims = NamedTuple[]
+        for (si,seed) in enumerate((11,12,13,14)); c=_cores(seed, 1000+si); append!(calrois, c.rois); push!(calsims, c.img); end
         mcomps = diverse_comps(777, NHEART); mph = build_thorax(mcomps); macq = run_acq(mph.gpu; seed=999); mmid = size(macq.hu70,3)÷2+1
         mrc = roi_cores(mph.cpu, macq.geom, (RECON_N,RECON_N,3), collect(ROD0:(ROD0+NHEART-1)))
         map40 = Array(macq.hu40[:,:,mmid]); map70 = Array(macq.hu70[:,:,mmid]); map_m2 = mrc.m2; mph=nothing; GC.gc(true)
-        serialize(CACHE, (; calrois, map40, map70, map_m2, mcomps))
+        serialize(CACHE, (; calrois, map40, map70, map_m2, mcomps, calsims))
     end
-    Dm = deserialize(CACHE); calrois = Dm.calrois; map40, map70, map_m2, mcomps = Dm.map40, Dm.map70, Dm.map_m2, Dm.mcomps
+    Dm = deserialize(CACHE); calrois = Dm.calrois; map40, map70, map_m2, mcomps = Dm.map40, Dm.map70, Dm.map_m2, Dm.mcomps; calsims = Dm.calsims
     # ── circular held-out test (5 sims → 65 ROIs; own cache) ──
     if !isfile(TCACHE)
         println("── running circular test thorax (5 sims) ──")
-        testrois = NamedTuple[]; for (si,seed) in enumerate((201,202,203,204,205)); append!(testrois, _cores(seed, 91260708+si)); end
-        serialize(TCACHE, (; testrois))
+        testrois = NamedTuple[]; testsims = NamedTuple[]
+        for (si,seed) in enumerate((201,202,203,204,205)); c=_cores(seed, 91260708+si); append!(testrois, c.rois); push!(testsims, c.img); end
+        serialize(TCACHE, (; testrois, testsims))
     end
-    testrois = deserialize(TCACHE).testrois
+    Dt = deserialize(TCACHE); testrois = Dt.testrois; testsims = Dt.testsims
     # ── integrated-HU size series (one centred fat insert per sim) ──
     if !isfile(ICACHE)
         println("── running integrated-HU size series ──")
@@ -315,17 +320,18 @@ begin
     # ── sector validation thorax (held-out shape) ──
     if !isfile(SCACHE)
         println("── running sector validation thorax ──")
-        sectrois = NamedTuple[]
+        sectrois = NamedTuple[]; sectsims = NamedTuple[]
         for (si,seed) in enumerate((401,402,405,406))                # 4 sims → 64 ROIs
             sc = diverse_comps(70260708+si, NSECT); sp = build_thorax(sc; sectors=(SECT_NANG,SECT_NRAD)); sa = run_acq(sp.gpu; seed=seed)
-            lc = Dict(ROD0-1+k => sc[k] for k in 1:NSECT); append!(sectrois, collect_rois(sa, sp.cpu, lc; radius_px=7).rois); sp=nothing; GC.gc(true)
+            lc = Dict(ROD0-1+k => sc[k] for k in 1:NSECT); append!(sectrois, collect_rois(sa, sp.cpu, lc; radius_px=7).rois)
+            smid = size(sa.hu70,3)÷2+1; push!(sectsims, (; seed, hu40=Array(sa.hu40[:,:,smid]), hu70=Array(sa.hu70[:,:,smid]), comps=sc)); sp=nothing; GC.gc(true)
         end
         scomps = diverse_comps(70260800, NSECT); smph = build_thorax(scomps; sectors=(SECT_NANG,SECT_NRAD)); smacq = run_acq(smph.gpu; seed=403)
         smid = size(smacq.hu70,3)÷2+1; smrc = roi_cores(smph.cpu, smacq.geom, (RECON_N,RECON_N,3), collect(ROD0:(ROD0+NSECT-1)))
         smap40 = Array(smacq.hu40[:,:,smid]); smap70 = Array(smacq.hu70[:,:,smid]); smap_m2 = smrc.m2; smph=nothing; GC.gc(true)
-        serialize(SCACHE, (; sectrois, smap40, smap70, smap_m2, scomps))
+        serialize(SCACHE, (; sectrois, smap40, smap70, smap_m2, scomps, sectsims))
     end
-    DS = deserialize(SCACHE); sectrois = DS.sectrois; smap40, smap70, smap_m2, scomps = DS.smap40, DS.smap70, DS.smap_m2, DS.scomps
+    DS = deserialize(SCACHE); sectrois = DS.sectrois; smap40, smap70, smap_m2, scomps = DS.smap40, DS.smap70, DS.smap_m2, DS.scomps; sectsims = DS.sectsims
 
     # ── calibration: quadratic surface (point accuracy) + AFFINE lipid (integrals) + noise ladder ──
     m40c=[r.m40 for r in calrois]; m70c=[r.m70 for r in calrois]
