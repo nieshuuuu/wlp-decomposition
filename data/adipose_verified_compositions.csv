@@ -1,0 +1,10 @@
+study,source,specimen,lipid_pct,water_pct,protein_pct,ash_pct,state,derivation
+1,Mitchell et al. 1945,single cadaver adipose,42.44,50.09,7.06,0.51,healthy,table direct
+2,Forbes et al. 1953,single cadaver adipose,71.57,23.02,5.85,0.20,healthy,table direct
+3,Forbes et al. 1956,1953 specimen adipose,78.35,16.76,6.75,0.95,healthy,table direct
+3,Forbes et al. 1956,1954 emaciated specimen,4.24,83.86,12.76,0.75,cachectic,table direct (off-plot; lipid<40)
+4,Entenman et al. 1958,subject B (53yr) pre-weight-loss,79.2,18.0,,,obese,Table 4 direct (fat/water/residue%=79.2/18.0/2.8; residue not split into protein/ash)
+4,Entenman et al. 1958,subject B (53yr) post-weight-loss,62.3,32.4,,,reduced,Table 4 direct (62.3/32.4/5.3)
+4,Entenman et al. 1958,subject E (44yr) pre-weight-loss,85.7,12.5,,,obese,Table 4 direct (85.7/12.5/1.8)
+4,Entenman et al. 1958,subject E (44yr) post-weight-loss,78.9,17.7,,,reduced,Table 4 direct (78.9/17.7/3.4)
+7,Morse & Soeldner 1963,abstract-digest mean (obese+nonobese),,15.0,,,comparison,abstract only; mean adipose water 15%; no per-sample table in the provided PDF

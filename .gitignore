@@ -1,0 +1,15 @@
+# Julia
+*.jl.cov
+*.jl.*.cov
+*.jl.mem
+/docs/build/
+LocalPreferences.toml
+
+# Pluto live-session cache (regenerated; not source)
+*.pluto-cache.toml
+
+# macOS
+.DS_Store
+
+# scratch
+/scratch/
