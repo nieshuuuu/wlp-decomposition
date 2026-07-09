@@ -4,6 +4,37 @@
 using Markdown
 using InteractiveUtils
 
+# ╔═╡ aaaa0002-0000-4000-8000-000000000002
+md"""
+# Water–Lipid–Protein Material Decomposition on a QRM-Thorax — a pure-physics study
+
+Recover the **volumetric fractions** ``(f_w, f_l, f_p)`` of water/lipid/protein mixtures from dual-energy CT
+on a **stadium QRM-thorax phantom** (faithful PCATSim geometry: two lungs split by a mediastinal muscle column,
+ribs, spine, and a heart cavity holding the material inserts). Everything is inline (the only data file is the
+Woodard adipose CSV for the prior): mix materials by volume fraction, simulate 80/140-kVp DECT with
+[BasisSimulator.jl](https://github.com/MolloiLab/BasisSimulator.jl) **(v0.8.0, `:dd_fast`)**, synthesize VMI at
+**40 and 70 keV**, and invert.
+
+**Two complementary products.**
+1. A **quadratic calibration surface** ``f=\\mathrm{poly}_2(\\mathrm{HU}_{40},\\mathrm{HU}_{70})`` for per-voxel
+   point accuracy, delivered as a **boundary-agnostic** map (per-voxel decode + σ_f-weighted edge-preserving
+   Huber-TV — never the ground-truth boundary, which real fat doesn't give you).
+2. An **integrated-HU** (mass-conservation) estimator for the PVE-robust *total* lipid: a normalized recon PSF
+   conserves the integral, so integrating an **affine** decode of the linearly-mixing HU over a generous region
+   with a **local muscle background** recovers the lipid that partial volume spreads past the visible edge — the
+   quantity the object-extent measure under-reports for small fat.
+
+**Validation:** calibrate on packed circular inserts; test on **held-out circular + sector** geometry.
+
+!!! warning "Requires BasisSimulator v0.8.0 (`:dd_fast`) and a wide, bowtie-free scan geometry"
+    The recon must be quantitative (pure lipid −204 vs theoretical −213, <5%). The 350 mm fat ring also needs a
+    **wide detector (1300 cols ≈ 415 mm scan FOV) and `bowtie=:none`** or the ring truncates/fades; and **984
+    views** to suppress aliasing. Validate the sim against pure-material HU before trusting any decode.
+"""
+
+# ╔═╡ aaaa0003-0000-4000-8000-000000000003
+md"## 1 · Setup"
+
 # ╔═╡ aaaa0001-0000-4000-8000-000000000001
 begin
     import Pkg
@@ -19,48 +50,9 @@ begin
     to_gpu(x) = Metal.functional() ? Metal.MtlArray(x) : x
     const DATA = joinpath(@__DIR__, "data")
     const ASSET = joinpath(@__DIR__, "assets")
-    safe_save(p, f) = CM.save(p, f; px_per_unit = 1.4)   # figures ≤1300 wide ⇒ ≤1820 px/side
-    md"imports · GPU backend (Metal, CPU fallback) · `safe_save` (≤1920 px/side)"
+    safe_save(p, f; pu=1.4) = CM.save(p, f; px_per_unit=pu)   # figures ≤1520 wide ⇒ ≤2130 px; keep ≤2000 side
+    md"imports · GPU backend (Metal, CPU fallback) · `safe_save`"
 end
-
-# ╔═╡ aaaa0002-0000-4000-8000-000000000002
-md"""
-# Water–Lipid–Protein Material Decomposition — a pure-physics study
-
-Recover the **volumetric fractions** ``(f_w, f_l, f_p)`` of a water/lipid/protein mixture from
-dual-energy CT. Everything is inline (no module scripts; the phantom is generated in code — the only data
-file is the Woodard adipose CSV for the prior): mix materials by volume fraction, simulate 80/140-kVp DECT with
-[BasisSimulator.jl](https://github.com/MolloiLab/BasisSimulator.jl) **(v0.8.0)**, synthesize VMI at
-**40 and 70 keV**, and invert.
-
-**The math.** Per voxel, with pure-material endpoints ``\\mathbf p_w,\\mathbf p_l,\\mathbf p_p`` in the
-``(\\mathrm{HU}_{40},\\mathrm{HU}_{70})`` plane:
-
-```math
-f_w\\,\\mu_{w,E}+f_l\\,\\mu_{l,E}+f_p\\,\\mu_{p,E}+\\varepsilon_E=m_E,\\quad E\\in\\{40,70\\};\\qquad f_w+f_l+f_p=1.
-```
-
-The per-material noise terms collapse to one ``\\varepsilon_E`` per energy read off the single
-heteroscedastic curve ``\\sigma_E(\\mathrm{HU})`` (convex-quadratic below). Water-referencing
-(``f_w=1-f_l-f_p``) gives a square ``2\\times2`` system ``\\mathbf m-\\mathbf p_w=G\\theta+\\varepsilon``,
-``\\theta=(f_l,f_p)``, so the noiseless locus is the **triangle** ``\\triangle(\\mathbf p_w,\\mathbf p_l,\\mathbf p_p)``.
-The decode is a **calibration surface** ``f=\\mathrm{poly}_2(\\mathrm{HU}_{40},\\mathrm{HU}_{70})`` fit from
-known mixtures, applied per-region (√N-pooled) and per-voxel; the adipose prior
-``\\mathcal N(f_w)\\,\\mathcal N(f_l)\\,\\Gamma(f_p)`` supports Bayesian per-voxel refinement.
-
-**Headline result (97 test ROIs, ø28 mm rods, diverse compositions).** ``f_w`` **CCC 0.99**,
-``f_l`` **1.00**, ``f_p`` **1.00** (all slopes ≈ 1.0) — all three ≫ 0.9. Detectability: **100% of ROIs
-< 5 HU at 70 keV** (mean 0.8 HU).
-
-!!! warning "Requires BasisSimulator v0.8.0 with `projector = :dd_fast`"
-    The recon must be quantitative: on v0.8.0 pure lipid reads −205 HU vs theoretical −213 (< 2%,
-    matching example 07). The old v0.2.1 projector compressed non-water HU by ~50 HU, which breaks the
-    linear-additive mixture model and would cap f_water near 0.75 — a **simulator artifact, not physics**.
-    Always validate the sim by measuring pure-material rods against `theoretical_hu` before trusting a decode.
-"""
-
-# ╔═╡ aaaa0003-0000-4000-8000-000000000003
-md"## 1 · Setup"
 
 # ╔═╡ aaaa0005-0000-4000-8000-000000000005
 md"## 2 · Materials & theoretical endpoints"
@@ -71,7 +63,6 @@ begin
         Dict{Int,Float64}(1=>0.066, 6=>0.534, 7=>0.170, 8=>0.220, 16=>0.010))   # Woodard & White 1986
     const WATER = BS.XA.Materials.basis_water; const LIPID = BS.XA.Materials.basis_lipid
     ρval(m) = BS.XA.val(m.density); const ΡW, ΡL, ΡP = ρval(WATER), ρval(LIPID), ρval(PROTEIN)
-    "Volume fractions (fw,fl,fp) → one effective attenuating Material (attenuation uses density+composition only)."
     function wlp_material(fw, fl, fp; name="wlp")
         ρ = fw*ΡW + fl*ΡL + fp*ΡP; mf = (fw*ΡW/ρ, fl*ΡL/ρ, fp*ΡP/ρ); comp = Dict{Int,Float64}()
         for (m,wm) in ((WATER,mf[1]),(LIPID,mf[2]),(PROTEIN,mf[3])), (Z,f) in m.composition
@@ -87,15 +78,12 @@ begin
 end
 
 # ╔═╡ aaaa0007-0000-4000-8000-000000000007
-md"""## 3 · Composition generation
-Adipose `draw_wlp` (KDE of the Woodard 1986 data, for the *prior*) and `diverse_comps` (spanning the
-simplex, the *test* set of "different volumetric fractions")."""
+md"## 3 · Composition generation"
 
 # ╔═╡ aaaa0008-0000-4000-8000-000000000008
 begin
     const ADI = ("healthy","obese","reduced","comparison","unspecified")
     mass_to_vol(w,l,p) = (v=(w/ΡW,l/ΡL,p/ΡP); s=sum(v); v./s)
-    "KDE draw of adipose (f_w,f_l,f_p): Scott-bandwidth KDE on lipid% + logistic-normal protein share."
     function draw_wlp(seed, n; csv=joinpath(DATA,"adipose_composition_distribution.csv"))
         raw=readdlm(csv,','; header=false); hdr=string.(raw[1,:]); rows=raw[2:end,:]
         ci(x)=findfirst(==(x),hdr); cc,cl,cp,cs=ci("component"),ci("lipid_pct"),ci("component_pct"),ci("state")
@@ -105,62 +93,98 @@ begin
         rng=MersenneTwister(seed); bwL=std(L)*length(L)^(-1/5); q=sp./(100 .-sl); z=log.(q./(1 .-q)); μz,σz=mean(z),std(z)
         [(l=clamp(L[rand(rng,1:length(L))]+bwL*randn(rng),50.,99.);qq=1/(1+exp(-(μz+σz*randn(rng))));p=qq*(100-l);mass_to_vol(100-l-p,l,p)) for _ in 1:n]
     end
-    "Diverse compositions spanning the WLP simplex (f_l 0.05–0.95, f_p 0–0.3)."
     function diverse_comps(seed, n)
         rng=MersenneTwister(seed); out=NTuple{3,Float64}[]
         for _ in 1:n; fl=0.05+0.9*rand(rng);fp=0.3*rand(rng);fw=1-fl-fp; fw<0.02&&(fl-=0.02-fw;fw=0.02); push!(out,(fw,fl,fp)); end
         out
     end
-    md"`draw_wlp` (adipose prior) · `diverse_comps` (spanning test set)"
+    md"`draw_wlp` (adipose prior, Woodard KDE) · `diverse_comps` (spanning test set)"
 end
 
 # ╔═╡ aaaa0009-0000-4000-8000-000000000009
-md"""## 4 · Phantom & forward acquisition
-Phantom generated inline (no data file): a Ø280 mm water cylinder with **13 ø28 mm rods** (1 centre + 6 + 6)
-— big enough that an eroded ROI core exceeds 200 mm². 16-sector geometry (8 angular × 2 radial) too.
-Dual-kVp EICT with the **`:dd_fast`** projector → Cong water/iodine basis → FBP (3-slice, inside the
-cone-usable z-band) → VMI at 40 & 70 keV."""
+md"""## 4 · Stadium QRM-thorax phantom & forward acquisition
+Faithful PCATSim geometry: fat-ring/muscle/lung **stadiums**, two lungs split by the mediastinal muscle
+bridges, ribs, spine with vertebral arch, and a **heart cavity** holding the inserts. Heart holds **13
+hex-packed ø19.9 mm circular inserts** (insert size *derived* from the recon pixel so an eroded core ≥ 225 mm²),
+or **8×2 solid sectors** (held-out shape), or a single centred insert (integrated-HU size series).
+Dual-kVp EICT (`:dd_fast`) → Cong water/iodine basis → FBP → VMI at 40 & 70 keV."""
 
 # ╔═╡ aaaa0010-0000-4000-8000-000000000010
 begin
-    const ROD0, NROD = 8, 13; const RODMM, VOXMM, BODYMM = 28.0, 0.4, 280.0   # rod ø, voxel, body ø (mm)
-    big_centers()=(cs=NTuple{2,Float64}[]; for (r,k) in zip((0.0,60.0,110.0),(1,6,6)),m in 0:k-1
-            θ=2π*m/k+(r>0 ? π/k : 0.0); push!(cs,(r*cos(θ),r*sin(θ))); end; cs)
-    const BIGC=big_centers(); @assert length(BIGC)==NROD                        # 1 centre + 6 (r60) + 6 (r110)
-    _canvas()=(n=round(Int,BODYMM/VOXMM)+40; (n=n,c=(n+1)/2,rb=BODYMM/2/VOXMM))
+    const ROD0 = 8; const VOXMM = 0.4                              # first insert label · phantom voxel (mm)
+    const RECON_FOV_MM = 380.0; const RECON_N = 512               # recon geometry — SSoT (fov_cm × 10)
+    const RECON_PX_MM  = RECON_FOV_MM / RECON_N                    # 0.7422 mm/recon-px (ROIs live on the recon grid)
+    const HC_X, HC_Y = 185.0, 115.0                                # heart cavity centre (image-frame mm)
+    const HEART_R_MM = 55.0
+    const PACK_R_MM = 50.0; const EROSION_PX = 2; const MIN_AREA_MM2 = 225.0; const INSERT_GAP_MM = 2.5
+    insert_radius_for_area(min_area, erosion_px, px=RECON_PX_MM) = sqrt(min_area/π) + erosion_px*px
+    function pack_inserts(container_r, insert_r, gap)             # hex-lattice fill; count DERIVED from pixel size
+        step=2insert_r+gap; h=step*sqrt(3)/2; Rc=container_r-insert_r; cs=NTuple{2,Float64}[]; nrow=ceil(Int,Rc/h)+1
+        for row in -nrow:nrow; y=row*h; xoff=isodd(row) ? step/2 : 0.0
+            for col in -(ceil(Int,Rc/step)+2):(ceil(Int,Rc/step)+2); x=col*step+xoff; hypot(x,y)≤Rc+1e-9 && push!(cs,(x,y)); end; end
+        cs
+    end
+    const INS_R  = insert_radius_for_area(MIN_AREA_MM2, EROSION_PX)   # ø19.9 mm
+    const HEARTC = pack_inserts(PACK_R_MM, INS_R, INSERT_GAP_MM)      # 13 packed insert centres (mm, rel heart)
+    const NHEART = length(HEARTC)
+    const SPARSE_RADII = [4.0,6.0,9.0,12.0]                           # integrated-HU size series (centred, one per sim)
+    const SECT_R_MM = 50.0; const SECT_NANG = 8; const SECT_NRAD = 2; const NSECT = SECT_NANG*SECT_NRAD
+
+    # shape primitives (ported from PCATSim generate_qrm_thorax.jl; mm; mutate mask)
+    stad!(m,xs,ys,l,cx,cy,hs,r)=(r2=r*r;@inbounds for j in eachindex(ys);dy=ys[j]-cy;for i in eachindex(xs);dx=abs(xs[i]-cx)-hs;dxc=dx>0 ? dx : 0.0;dxc*dxc+dy*dy≤r2&&(m[i,j]=l);end;end)
+    circ!(m,xs,ys,l,cx,cy,r)=(r2=r*r;@inbounds for j in eachindex(ys);dy=ys[j]-cy;for i in eachindex(xs);dx=xs[i]-cx;dx*dx+dy*dy≤r2&&(m[i,j]=l);end;end)
+    rectxy!(m,xs,ys,l,xa,xb,ya,yb)=(@inbounds for j in eachindex(ys);y=ys[j];(y<ya||y>yb)&&continue;for i in eachindex(xs);xa≤xs[i]≤xb&&(m[i,j]=l);end;end)
+    function ellr!(m,xs,ys,l,cx,cy,a,b,θ);ct=cos(θ);st=sin(θ);a2=a*a;b2=b*b;@inbounds for j in eachindex(ys);dy=ys[j]-cy;for i in eachindex(xs);dx=xs[i]-cx;xr=dx*ct+dy*st;yr=-dx*st+dy*ct;(xr*xr)/a2+(yr*yr)/b2≤1&&(m[i,j]=l);end;end;end
+    function fbl!(m,xs,ys,l,cx,ly,hcy,hr,ra,yt,yb);acy=ly+ra;dy=acy-hcy;L=sqrt((hr+ra)^2-dy^2);ar2=ra^2;@inbounds for j in eachindex(ys);y=ys[j];(y<yt||y>yb)&&continue;dyc=y-acy;d2=dyc*dyc;for i in eachindex(xs);x=xs[i];abs(x-cx)>L&&continue;dxr=x-(cx+L);dxl=x-(cx-L);(dxr*dxr+d2≥ar2&&dxl*dxl+d2≥ar2)&&(m[i,j]=l);end;end;end
+    function fbc!(m,xs,ys,l,cx,cyt,rt,cyb,rb,ra,yt,yb);Δr=rt-rb;Σ=rt+rb+2ra;Δy=cyb-cyt;cya=(cyt+cyb)/2+Δr*Σ/(2Δy);dy=cya-cyt;L=sqrt((rt+ra)^2-dy^2);ar2=ra^2;@inbounds for j in eachindex(ys);y=ys[j];(y<yt||y>yb)&&continue;dyc=y-cya;d2=dyc*dyc;for i in eachindex(xs);x=xs[i];abs(x-cx)>L&&continue;dxr=x-(cx+L);dxl=x-(cx-L);(dxr*dxr+d2≥ar2&&dxl*dxl+d2≥ar2)&&(m[i,j]=l);end;end;end
+    function tcol!(m,xs,ys,l,cx,hwt,hwb,yt,yb);ih=1.0/(yb-yt);@inbounds for j in eachindex(ys);y=ys[j];(y<yt||y>yb)&&continue;hw=hwt+(hwb-hwt)*(y-yt)*ih;for i in eachindex(xs);abs(xs[i]-cx)≤hw&&(m[i,j]=l);end;end;end
+    scl!(m,xs,ys,l,cx,cy,r)=(r2=r*r;@inbounds for j in eachindex(ys);y=ys[j];y<cy&&continue;dy=y-cy;for i in eachindex(xs);dx=xs[i]-cx;dx*dx+dy*dy≤r2&&(m[i,j]=l);end;end)
+    function varch!(m,xs,ys,l;apex_y,base_y,base_hw,sagitta=1.0,only_over=0xFF);sl=base_hw/(base_y-apex_y);cc=sagitta>0;ar=cc ? (base_hw^2+sagitta^2)/(2sagitta) : 0.0;acy=cc ? base_y+ar-sagitta : 0.0;ar2=ar*ar;@inbounds for j in eachindex(ys);y=ys[j];(y<apex_y||y>base_y)&&continue;hw=(y-apex_y)*sl;for i in eachindex(xs);x=xs[i];abs(x-185.0)>hw&&continue;if cc;dx=x-185.0;dy=y-acy;dx*dx+dy*dy<ar2&&continue;end;(only_over==0xFF||m[i,j]==only_over)&&(m[i,j]=l);end;end;end
+
     function _phantom(lbl,mats; nz=40)
         m3=repeat(reshape(lbl,size(lbl)...,1),1,1,nz); vc=VOXMM/10
         pc=BS.create_phantom_from_mask(Array{Int,3}(m3),mats,(vc,vc,vc))
         (cpu=pc,gpu=BS.Phantom(to_gpu(pc.mask),pc.materials,pc.voxel_size,pc.origin,pc.extent))
     end
-    function build_rods(comps; nz=40)                                          # 13 big circular rods in water
-        @assert length(comps)==NROD; g=_canvas(); n,c,rb=g.n,g.c,g.rb; rr=RODMM/2/VOXMM; lbl=zeros(UInt8,n,n)
-        @inbounds for j in 1:n,i in 1:n
-            (i-c)^2+(j-c)^2 ≤ rb^2 || continue; lab=UInt8(1)
-            for (ri,(cx,cy)) in enumerate(BIGC); px=c+cx/VOXMM; py=c+cy/VOXMM
-                if (i-px)^2+(j-py)^2 ≤ rr^2; lab=UInt8(ROD0-1+ri); break; end; end
-            lbl[i,j]=lab
+    function build_thorax(comps; centres=HEARTC, ins_r=INS_R, radii=nothing, sectors=nothing, contrast=nothing, nz=40)
+        vs=VOXMM; W=round(Int,370/vs); H=round(Int,270/vs)
+        xs=[(i-0.5)*vs for i in 1:W]; ys=[(j-0.5)*vs for j in 1:H]; lbl=zeros(UInt8,W,H)
+        stad!(lbl,xs,ys,0x05,185.0,135.0,50.0,125.0); stad!(lbl,xs,ys,0x02,185.0,135.0,50.0,100.0); stad!(lbl,xs,ys,0x01,185.0,135.0,50.0,80.0)
+        fbl!(lbl,xs,ys,0x02,185.0,55.0,115.0,55.0,5.0,55.0,70.0); fbc!(lbl,xs,ys,0x02,185.0,115.0,55.0,190.0,20.0,5.0,167.55,175.86)
+        circ!(lbl,xs,ys,0x02,HC_X,HC_Y,HEART_R_MM)
+        if sectors===nothing
+            @assert length(comps)==length(centres)
+            for (k,(cx,cy)) in enumerate(centres); circ!(lbl,xs,ys,UInt8(ROD0-1+k),HC_X+cx,HC_Y+cy,radii===nothing ? ins_r : radii[k]); end
+        else
+            nang,nrad=sectors; @assert length(comps)==nang*nrad
+            @inbounds for j in 1:H, i in 1:W
+                x=xs[i]-HC_X; y=ys[j]-HC_Y; d2=x*x+y*y; d2≤SECT_R_MM^2 || continue
+                ri=min(nrad-1,floor(Int,sqrt(d2)/(SECT_R_MM/nrad))); ai=min(nang-1,floor(Int,mod(atan(y,x),2π)/(2π/nang)))
+                lbl[i,j]=UInt8(ROD0+ri*nang+ai)
+            end
         end
-        mats=Dict{Int,BS.XA.Material}(0=>BS.XA.Materials.air,1=>BS.XA.Materials.water)
-        for k in 1:NROD; mats[ROD0-1+k]=wlp_material(comps[k]...;name="rod$k"); end
-        _phantom(lbl,mats;nz=nz)
+        ribs=((185.0,45.0,0.0),(71.4,71.4,-π/4),(45.0,135.0,π/2),(71.4,198.6,π/4),(298.6,71.4,π/4),(325.0,135.0,π/2),(298.6,198.6,-π/4))
+        for (a,b,θ) in ribs; ellr!(lbl,xs,ys,0x03,a,b,8.0,2.5,θ); end
+        for (a,b,θ) in ribs; ellr!(lbl,xs,ys,0x04,a,b,7.0,1.5,θ); end
+        circ!(lbl,xs,ys,0x03,185.0,190.0,20.0)
+        varch!(lbl,xs,ys,0x02;apex_y=201.05,base_y=216.0,base_hw=42.0,sagitta=1.0,only_over=0x01)
+        varch!(lbl,xs,ys,0x03;apex_y=201.05,base_y=212.67,base_hw=32.66,sagitta=1.0)
+        circ!(lbl,xs,ys,0x03,172.39,205.54,1.5); circ!(lbl,xs,ys,0x03,197.61,205.54,1.5)
+        tcol!(lbl,xs,ys,0x03,185.0,9.0,2.5,211.67,214.67); rectxy!(lbl,xs,ys,0x03,182.5,187.5,214.67,230.0)
+        scl!(lbl,xs,ys,0x03,185.0,230.0,2.5); circ!(lbl,xs,ys,0x04,185.0,190.0,18.0)
+        if contrast!==nothing; (cx,cy,cr)=contrast; circ!(lbl,xs,ys,0x07,cx,cy,cr); end
+        mats=Dict{Int,BS.XA.Material}(0=>BS.XA.Materials.air,1=>BS.XA.Materials.lung,2=>BS.XA.Materials.muscle,
+            3=>BS.XA.Materials.corticalbone,4=>BS.XA.Materials.marrow_red,5=>BS.XA.Materials.adipose)
+        contrast!==nothing && (mats[7]=BS.XA.Materials.gammex_472_i5_0)
+        for k in 1:length(comps); mats[ROD0-1+k]=wlp_material(comps[k]...;name="ins$k"); end
+        merge(_phantom(lbl,mats;nz=nz), (centres_mm=centres, ins_r=ins_r))
     end
-    function build_sectors(comps; sect_r_mm=100.0, nz=40)                       # 16 solid sectors (8 angular × 2 radial)
-        @assert length(comps)==16; g=_canvas(); n,c,rb=g.n,g.c,g.rb; rs=sect_r_mm/VOXMM; lbl=zeros(UInt8,n,n)
-        @inbounds for j in 1:n,i in 1:n
-            d2=(i-c)^2+(j-c)^2; d2≤rb^2 || continue; d=sqrt(d2)
-            lbl[i,j]= d≤rs ? UInt8(ROD0+(d<rs/2 ? 0 : 8)+min(7,floor(Int,mod(atan(j-c,i-c),2π)/(2π/8)))) : UInt8(1)
-        end
-        mats=Dict{Int,BS.XA.Material}(0=>BS.XA.Materials.air,1=>BS.XA.Materials.water)
-        for s in 0:15; mats[ROD0+s]=wlp_material(comps[s+1]...;name="sec$s"); end
-        _phantom(lbl,mats;nz=nz)
-    end
-    const SCANNER=BS.Scanner(source_to_isocenter=625.6,source_to_detector=1100.0,detector_rows=256,detector_cols=834,
+    # wide detector (1300 cols ≈ 415 mm scan FOV ⊃ 350 mm fat ring) · bowtie=:none (no peripheral fade)
+    const SCANNER=BS.Scanner(source_to_isocenter=625.6,source_to_detector=1100.0,detector_rows=256,detector_cols=1300,
         detector_row_size=0.625,detector_col_size=0.6,focal_spot_width=1.0,focal_spot_length=1.0,
-        target_angle=10.0,flat_filter_material=:aluminum,flat_filter_thickness=2.5,bowtie_filter=:ge_revolution_large,
+        target_angle=10.0,flat_filter_material=:aluminum,flat_filter_thickness=2.5,bowtie_filter=:none,
         detector_material=:lumex,detector_depth=3.0,fill_factor_row=0.9,fill_factor_col=0.9,electronic_noise=0,detection_gain=10.0)
-    "One dual-kVp acquisition → VMI HU at 40 & 70 keV (:dd_fast projector · Cong water/iodine basis · FBP · z-median · 2-basis VMI)."
-    function run_acq(pg; views=360,collimation=2.5,matrix=(512,512,3),fov_cm=38.0,z_cm=0.1875,seed=1234,zmed=1)
+    function run_acq(pg; views=984,collimation=2.5,matrix=(RECON_N,RECON_N,3),fov_cm=RECON_FOV_MM/10,z_cm=0.1875,seed=1234,zmed=1)
         plow=BS.CTProtocol(kVp=80,mA=407*0.65,views=views,rotation_time=0.5,collimation_mm=collimation,additional_filters=[("Al",4.5)])
         phigh=BS.CTProtocol(kVp=140,mA=405*0.35,views=views,rotation_time=0.5,collimation_mm=collimation,additional_filters=[("Al",4.5)])
         so=BS.SimOptions(fidelity=:eict,use_noise=true,use_fill_factor=false,use_optical_crosstalk=false,use_scatter=false,projector=:dd_fast,seed=seed)
@@ -189,7 +213,7 @@ begin
         (cores=out,midz=midz,m2=m2)
     end
     function collect_rois(acq,pc,label_comp; radius_px=12)
-        rc=roi_cores(pc,acq.geom,(512,512,3),collect(keys(label_comp)); radius_px=radius_px); out=NamedTuple[]
+        rc=roi_cores(pc,acq.geom,(RECON_N,RECON_N,3),collect(keys(label_comp)); radius_px=radius_px); out=NamedTuple[]
         for (lab,c) in label_comp
             (haskey(rc.cores,lab)&&!isempty(rc.cores[lab]))||continue; ci=rc.cores[lab]
             v40=[Float64(acq.hu40[i,rc.midz]) for i in ci]; v70=[Float64(acq.hu70[i,rc.midz]) for i in ci]
@@ -197,233 +221,317 @@ begin
         end
         (rois=out,midz=rc.midz,m2=rc.m2)
     end
-    md"`build_rods` (13 ø28mm) · `build_sectors` · `run_acq` (:dd_fast, 3-slice) · `roi_cores` / `collect_rois` (r=12 px ≈ 250 mm²)"
+    md"`build_thorax` (packed / sector / centred) · `run_acq` (1300-col, bowtie-free, 984-view) · `roi_cores`/`collect_rois`"
 end
 
 # ╔═╡ aaaa0011-0000-4000-8000-000000000011
-md"""## 5 · Inverse: calibration surface · noise · prior
-**Calibration surface** ``f=\\mathrm{poly}_2(\\mathrm{HU}_{40},\\mathrm{HU}_{70})`` fit from known mixtures.
-Noise: convex-quadratic ``\\sigma_E(\\mathrm{HU})=a\\,\\mathrm{HU}^2+b\\,\\mathrm{HU}+c`` + inter-energy
-``\\rho``. Adipose prior ``\\mathcal N(f_w)\\,\\mathcal N(f_l)\\,\\Gamma(f_p)`` for Bayesian per-voxel refinement."""
+md"## 5 · Inverse: calibration surface · noise · edge-preserving TV"
 
 # ╔═╡ aaaa0012-0000-4000-8000-000000000012
 begin
     poly2(h4,h7)=[1.0,h4,h7,h4^2,h7^2,h4*h7]; surf(c,h4,h7)=dot(c,poly2(h4,h7))
     quad_sigma(c,H)=c[1]*H^2+c[2]*H+c[3]
-    function fit_sigma_quad(hu,sig); X=hcat(hu.^2,hu,ones(length(hu)));c=X\sig;c[1]<0&&(Xa=hcat(hu,ones(length(hu)));ca=Xa\sig;c=[0.0,ca[1],ca[2]]);c; end
-    "CCC (Lin), OLS slope/intercept, RMSE, 1:1 R²."
+    fit_sigma_quad(hu,sig)=(X=hcat(hu.^2,hu,ones(length(hu)));c=X\sig;c[1]<0&&(Xa=hcat(hu,ones(length(hu)));ca=Xa\sig;c=[0.0,ca[1],ca[2]]);c)
     function metrics(t,r)
         mt,mr=mean(t),mean(r);st2=mean((t.-mt).^2);sr2=mean((r.-mr).^2);str=mean((t.-mt).*(r.-mr))
         (ccc=2str/(st2+sr2+(mt-mr)^2),slope=str/st2,int=mr-str/st2*mt,rmse=sqrt(mean((r.-t).^2)),r2=1-sum((r.-t).^2)/sum((t.-mt).^2))
     end
+    # coupled edge-preserving Huber-TV on (f_l,f_p); w = optional σ_f data weight (1/σ_f²). Never Gaussian.
+    function tv_coupled(yl,yp,mask; lambda=0.05,iters=25,eps=0.04,w=nothing)
+        nx,ny=size(yl)
+        fl=[mask[i,j] ? Float64(yl[i,j]) : 0.0 for i in 1:nx,j in 1:ny]; fp=[mask[i,j] ? Float64(yp[i,j]) : 0.0 for i in 1:nx,j in 1:ny]
+        fl2=copy(fl);fp2=copy(fp); inb(i,j)=1≤i≤nx&&1≤j≤ny&&mask[i,j]
+        smp(a,b)=(a=max(a,0.0);b=max(b,0.0);s=a+b;s>1 ? (a/s,b/s) : (a,b))
+        for _ in 1:iters
+            @inbounds for j in 1:ny,i in 1:nx
+                mask[i,j] || (fl2[i,j]=fl[i,j];fp2[i,j]=fp[i,j];continue)
+                wij = (w===nothing || !isfinite(w[i,j])) ? 1.0 : w[i,j]
+                rl=wij*Float64(yl[i,j]);rp=wij*Float64(yp[i,j]);den=wij
+                for (di,dj) in ((1,0),(-1,0),(0,1),(0,-1)); inb(i+di,j+dj)||continue
+                    dl=fl[i+di,j+dj]-fl[i,j];dp=fp[i+di,j+dj]-fp[i,j];c=lambda/max(sqrt(dl^2+dp^2),eps)
+                    rl+=c*fl[i+di,j+dj];rp+=c*fp[i+di,j+dj];den+=c; end
+                fl2[i,j],fp2[i,j]=smp(rl/den,rp/den)
+            end
+            fl,fl2=fl2,fl;fp,fp2=fp2,fp
+        end
+        ([mask[i,j] ? fl[i,j] : NaN for i in 1:nx,j in 1:ny],[mask[i,j] ? fp[i,j] : NaN for i in 1:nx,j in 1:ny])
+    end
+    dpoly4(h4,h7)=[0.0,1.0,0.0,2h4,0.0,h7]; dpoly7(h4,h7)=[0.0,0.0,1.0,0.0,2h7,h4]
+    label_centroid(m2,lab)=(idx=findall(==(UInt8(lab)),m2); (mean(getindex.(idx,1)),mean(getindex.(idx,2))))
     struct BayesPrior; μ_w::Float64; s_w::Float64; μ_l::Float64; s_l::Float64; α_p::Float64; θ_p::Float64; end
     bayes_prior_broad(comps;s_wl=0.15,fp_shape=1.2,fp_scale=0.10)=(fw=[c[1] for c in comps];fl=[c[2] for c in comps];BayesPrior(mean(fw),s_wl,mean(fl),s_wl,fp_shape,fp_scale))
-    md"`surf` (calibration) · `fit_sigma_quad` (noise) · `metrics` (CCC…) · `bayes_prior_broad`"
+    md"`surf` (calibration) · `fit_sigma_quad` · `metrics` (CCC…) · `tv_coupled` (σ_f Huber-TV) · `bayes_prior_broad`"
 end
 
 # ╔═╡ aaaa0013-0000-4000-8000-000000000013
-md"""## 6 · Run calibration + test sims (cached)
-6 calibration + 5 circular + 2 sector + 1 map acquisitions. First run ≈ 6 min on GPU; results cache to
-`wlp_sim_cache.jls`, so re-opening is instant. Delete that file to re-simulate."""
+md"""## 6 · Run sims + calibrate + decode (cached)
+4 calibration + 3 circular-test + 1 map thorax; 4 centred integrated-HU sims; 2 sector-test + 1 sector-map.
+First run ≈ 15 min on GPU; results cache to `wlp_*_cache_v2.jls`. Delete those to re-simulate."""
 
 # ╔═╡ aaaa0014-0000-4000-8000-000000000014
 begin
-    const CACHE = joinpath(@__DIR__, "wlp_sim_cache.jls")
+    const CACHE  = joinpath(@__DIR__, "wlp_sim_cache_v2.jls")
+    const ICACHE = joinpath(@__DIR__, "wlp_int_cache_v2.jls")
+    const SCACHE = joinpath(@__DIR__, "wlp_sect_cache_v2.jls")
+    const CORE_RPX = round(Int, INS_R/RECON_PX_MM - EROSION_PX)   # eroded interior core ≈ 225 mm²
+    const IFL = 0.85
+    # ── circular calibration + test + delivered-map thorax ──
     if !isfile(CACHE)
-        Random.seed!(1)
-        _calrois = NamedTuple[]
-        for (si,seed) in enumerate((11,12,13,14,15,16))
-            comps=diverse_comps(1000+si,NROD); ph=build_rods(comps); acq=run_acq(ph.gpu;seed=seed)
-            lc=Dict(ROD0-1+k=>comps[k] for k in 1:NROD); append!(_calrois,collect_rois(acq,ph.cpu,lc).rois); ph=nothing;GC.gc(true)
+        println("── running thorax sims (first time; ~9 min) ──"); Random.seed!(1)
+        thorax_cores(seed, cseed) = begin
+            comps = diverse_comps(cseed, NHEART); ph = build_thorax(comps); acq = run_acq(ph.gpu; seed=seed)
+            lc = Dict(ROD0-1+k => comps[k] for k in 1:NHEART)
+            rois = collect_rois(acq, ph.cpu, lc; radius_px=CORE_RPX).rois; ph=nothing; GC.gc(true); rois
         end
-        _testrois=NamedTuple[]; _geomtag=Symbol[]
-        for (si,seed) in enumerate((201,202,203,204,205))
-            comps=diverse_comps(91260708+si,NROD); ph=build_rods(comps); acq=run_acq(ph.gpu;seed=seed)
-            lc=Dict(ROD0-1+k=>comps[k] for k in 1:NROD)
-            for r in collect_rois(acq,ph.cpu,lc).rois; push!(_testrois,r);push!(_geomtag,:circular); end; ph=nothing;GC.gc(true)
-        end
-        for (si,seed) in enumerate((301,302))
-            comps=diverse_comps(50260708+si,16); ph=build_sectors(comps); acq=run_acq(ph.gpu;seed=seed)
-            lc=Dict(ROD0+s=>comps[s+1] for s in 0:15)
-            for r in collect_rois(acq,ph.cpu,lc).rois; push!(_testrois,r);push!(_geomtag,:sector); end; ph=nothing;GC.gc(true)
-        end
-        _mc=diverse_comps(777,NROD); mph=build_rods(_mc); macq=run_acq(mph.gpu;seed=999)
-        mlc=Dict(ROD0-1+k=>_mc[k] for k in 1:NROD); mrc=roi_cores(mph.cpu,macq.geom,(512,512,3),collect(keys(mlc)))
-        serialize(CACHE,(_calrois,_testrois,_geomtag,Array(macq.hu40[:,:,mrc.midz]),Array(macq.hu70[:,:,mrc.midz]),mrc.m2,_mc)); mph=nothing;GC.gc(true)
+        calrois = NamedTuple[]; for (si,seed) in enumerate((11,12,13,14)); append!(calrois, thorax_cores(seed, 1000+si)); end
+        testrois = NamedTuple[]; for (si,seed) in enumerate((201,202,203)); append!(testrois, thorax_cores(seed, 91260708+si)); end
+        mcomps = diverse_comps(777, NHEART); mph = build_thorax(mcomps); macq = run_acq(mph.gpu; seed=999); mmid = size(macq.hu70,3)÷2+1
+        mrc = roi_cores(mph.cpu, macq.geom, (RECON_N,RECON_N,3), collect(ROD0:(ROD0+NHEART-1)))
+        map40 = Array(macq.hu40[:,:,mmid]); map70 = Array(macq.hu70[:,:,mmid]); map_m2 = mrc.m2; mph=nothing; GC.gc(true)
+        serialize(CACHE, (; calrois, testrois, map40, map70, map_m2, mcomps))
     end
-    (calrois,testrois,geomtag,map40,map70,map_m2,mapcomps) = deserialize(CACHE)
+    D = deserialize(CACHE); calrois, testrois = D.calrois, D.testrois
+    map40, map70, map_m2, mcomps = D.map40, D.map70, D.map_m2, D.mcomps
+    # ── integrated-HU size series (one centred fat insert per sim) ──
+    if !isfile(ICACHE)
+        println("── running integrated-HU size series ──")
+        isims = NamedTuple[]
+        for r in SPARSE_RADII
+            ip = build_thorax([(1-IFL-0.05,IFL,0.05)]; centres=[(0.0,0.0)], radii=[r]); ia = run_acq(ip.gpu; seed=Int(round(500+r)))
+            im = size(ia.hu70,3)÷2+1; m2 = roi_cores(ip.cpu, ia.geom, (RECON_N,RECON_N,3), [ROD0]).m2
+            push!(isims, (r=r, hu40=Array(ia.hu40[:,:,im]), hu70=Array(ia.hu70[:,:,im]), m2=m2)); ip=nothing; GC.gc(true)
+        end
+        serialize(ICACHE, (; isims))
+    end
+    isims = deserialize(ICACHE).isims
+    # ── sector validation thorax (held-out shape) ──
+    if !isfile(SCACHE)
+        println("── running sector validation thorax ──")
+        sectrois = NamedTuple[]
+        for (si,seed) in enumerate((401,402))
+            sc = diverse_comps(70260708+si, NSECT); sp = build_thorax(sc; sectors=(SECT_NANG,SECT_NRAD)); sa = run_acq(sp.gpu; seed=seed)
+            lc = Dict(ROD0-1+k => sc[k] for k in 1:NSECT); append!(sectrois, collect_rois(sa, sp.cpu, lc; radius_px=7).rois); sp=nothing; GC.gc(true)
+        end
+        scomps = diverse_comps(70260800, NSECT); smph = build_thorax(scomps; sectors=(SECT_NANG,SECT_NRAD)); smacq = run_acq(smph.gpu; seed=403)
+        smid = size(smacq.hu70,3)÷2+1; smrc = roi_cores(smph.cpu, smacq.geom, (RECON_N,RECON_N,3), collect(ROD0:(ROD0+NSECT-1)))
+        smap40 = Array(smacq.hu40[:,:,smid]); smap70 = Array(smacq.hu70[:,:,smid]); smap_m2 = smrc.m2; smph=nothing; GC.gc(true)
+        serialize(SCACHE, (; sectrois, smap40, smap70, smap_m2, scomps))
+    end
+    DS = deserialize(SCACHE); sectrois = DS.sectrois; smap40, smap70, smap_m2, scomps = DS.smap40, DS.smap70, DS.smap_m2, DS.scomps
 
+    # ── calibration: quadratic surface (point accuracy) + AFFINE lipid (integrals) + noise ladder ──
     m40c=[r.m40 for r in calrois]; m70c=[r.m70 for r in calrois]
     fwc=[r.fw for r in calrois]; flc=[r.fl for r in calrois]; fpc=[r.fp for r in calrois]
     Xc=reduce(vcat,[poly2(m40c[i],m70c[i])' for i in eachindex(m40c)]); cw=Xc\fwc; cl=Xc\flc; cp=Xc\fpc
-    r2cal(c,y)=1-sum((surf.(Ref(c),m40c,m70c).-y).^2)/sum((y.-mean(y)).^2)
+    Xa=hcat(ones(length(m40c)),m40c,m70c); cl_aff=Xa\flc                 # affine f_l — linear ⇒ commutes with the PSF
+    r2fit(c,y)=1-sum((surf.(Ref(c),m40c,m70c).-y).^2)/sum((y.-mean(y)).^2)
     sc40=fit_sigma_quad(m40c,[r.s40 for r in calrois]); sc70=fit_sigma_quad(m70c,[r.s70 for r in calrois])
     res40=vcat([r.v40.-r.m40 for r in calrois]...); res70=vcat([r.v70.-r.m70 for r in calrois]...); ρ=cor(res40,res70)
     adipose=draw_wlp(20260708,2000); prior=bayes_prior_broad(adipose)
     decode(a,b)=(x=surf(cw,a,b);y=surf(cl,a,b);z=surf(cp,a,b);s=x+y+z;(x/s,y/s,z/s))
-    tfw=[r.fw for r in testrois];tfl=[r.fl for r in testrois];tfp=[r.fp for r in testrois]
-    dec=[decode(r.m40,r.m70) for r in testrois]; pfw=[d[1] for d in dec];pfl=[d[2] for d in dec];pfp=[d[3] for d in dec]
-    semfw=[std([decode(r.v40[j],r.v70[j])[1] for j in eachindex(r.v40)])/sqrt(length(r.v40)) for r in testrois]
+    aff_l(a,b)=cl_aff[1]+cl_aff[2]*a+cl_aff[3]*b
+
+    # ── point accuracy: combined circular + sector, per-voxel decode over the eroded core (GT only locates) ──
+    allrois=vcat(testrois,sectrois); geomtag=vcat(fill(:circular,length(testrois)),fill(:sector,length(sectrois)))
+    tfw=[r.fw for r in allrois];tfl=[r.fl for r in allrois];tfp=[r.fp for r in allrois]
+    pvox(r)=[decode(r.v40[j],r.v70[j]) for j in eachindex(r.v40)]
+    pfw=[mean(getindex.(pvox(r),1)) for r in allrois]; pfl=[mean(getindex.(pvox(r),2)) for r in allrois]; pfp=[mean(getindex.(pvox(r),3)) for r in allrois]
+    semfw=[std(getindex.(pvox(r),1))/sqrt(length(r.v40)) for r in allrois]
+    semfl=[std(getindex.(pvox(r),2))/sqrt(length(r.v40)) for r in allrois]; semfp=[std(getindex.(pvox(r),3))/sqrt(length(r.v40)) for r in allrois]
     mw=metrics(tfw,pfw);ml=metrics(tfl,pfl);mp=metrics(tfp,pfp)
-    dHU40=[abs(mix_hu(pfw[i],pfl[i],pfp[i],E40)-mix_hu(tfw[i],tfl[i],tfp[i],E40)) for i in eachindex(tfw)]
+    pfl_pool=[decode(r.m40,r.m70)[2] for r in allrois]; ml_pool=metrics(tfl,pfl_pool)
     dHU70=[abs(mix_hu(pfw[i],pfl[i],pfp[i],E70)-mix_hu(tfw[i],tfl[i],tfp[i],E70)) for i in eachindex(tfw)]
-    mlc2=Dict(ROD0-1+k=>mapcomps[k] for k in 1:NROD)
-    truemap=fill(NaN,size(map_m2)...,3); recmap=fill(NaN,size(map_m2)...,3); rodmask=falses(size(map_m2))
-    for lab in ROD0:(ROD0+NROD-1)
-        idx=findall(==(UInt8(lab)),map_m2); isempty(idx)&&continue
-        d=decode(mean(Float64(map40[I]) for I in idx), mean(Float64(map70[I]) for I in idx))
-        for I in idx; rodmask[I]=true; truemap[I,1],truemap[I,2],truemap[I,3]=mlc2[lab]; recmap[I,1],recmap[I,2],recmap[I,3]=d; end
+
+    # ── delivered map: per-voxel decode over gated soft tissue + σ_f-weighted edge-preserving Huber-TV ──
+    const SOFT_HU_LO, SOFT_HU_HI = -300.0, 250.0
+    function sigma_f_weight(h40,h70)
+        w=fill(NaN,size(h70))
+        for I in CartesianIndices(h70); (SOFT_HU_LO<h70[I]<SOFT_HU_HI)||continue
+            h4=Float64(h40[I]);h7=Float64(h70[I]); s4=quad_sigma(sc40,h4);s7=quad_sigma(sc70,h7)
+            g4l=dot(cl,dpoly4(h4,h7));g7l=dot(cl,dpoly7(h4,h7)); g4p=dot(cp,dpoly4(h4,h7));g7p=dot(cp,dpoly7(h4,h7))
+            vl=g4l^2*s4^2+g7l^2*s7^2+2ρ*g4l*g7l*s4*s7; vp=g4p^2*s4^2+g7p^2*s7^2+2ρ*g4p*g7p*s4*s7
+            w[I]=1.0/max(vl+vp,1e-6)
+        end; w
     end
-    _ri=findall(rodmask); _ci=extrema(getindex.(_ri,1)); _cj=extrema(getindex.(_ri,2)); _pad=12
-    crI=max(1,_ci[1]-_pad):min(size(map_m2,1),_ci[2]+_pad); crJ=max(1,_cj[1]-_pad):min(size(map_m2,2),_cj[2]+_pad)
-    truemap_c=truemap[crI,crJ,:]; recmap_c=recmap[crI,crJ,:]
-    Markdown.parse("cal n=$(length(calrois)), R²(f_w)=$(round(r2cal(cw,fwc),digits=2)); **TEST n=$(length(testrois))** — f_w CCC=**$(round(mw.ccc,digits=2))**, f_l CCC=**$(round(ml.ccc,digits=2))**, f_p CCC=**$(round(mp.ccc,digits=2))**; ρ=$(round(ρ,digits=2)).")
+    function fullfield(h40,h70)
+        fw=fill(NaN,size(h70));fl=copy(fw);fp=copy(fw)
+        for I in CartesianIndices(h70); (SOFT_HU_LO<h70[I]<SOFT_HU_HI)||continue
+            d=decode(Float64(h40[I]),Float64(h70[I])); fw[I]=d[1];fl[I]=d[2];fp[I]=d[3]; end
+        (fw,fl,fp)
+    end
+    function deliver(m40,m70,m2,comps)
+        f0=fullfield(m40,m70); gate=.!isnan.(f0[2]); w=sigma_f_weight(m40,m70)
+        fl_tv,fp_tv=tv_coupled(f0[2],f0[3],gate; lambda=0.05,iters=25,eps=0.04,w=w)
+        fw_tv=map((a,b)-> isnan(a) ? NaN : 1-a-b, fl_tv, fp_tv)
+        rec=cat(fw_tv,fl_tv,fp_tv;dims=3); tru=fill(NaN,size(m2)...,3); recgt=fill(NaN,size(m2)...,3)
+        for k in 1:length(comps); lab=ROD0-1+k
+            idx=findall(==(UInt8(lab)),m2); isempty(idx)&&continue
+            d=decode(mean(Float64(m40[I]) for I in idx),mean(Float64(m70[I]) for I in idx))
+            for I in idx; tru[I,1],tru[I,2],tru[I,3]=comps[k]; recgt[I,1],recgt[I,2],recgt[I,3]=d; end
+        end
+        (rec=rec,tru=tru,recgt=recgt)
+    end
+    circ = deliver(map40,map70,map_m2,mcomps)
+    sect = deliver(smap40,smap70,smap_m2,scomps)
+    recmap=circ.rec; truemap=circ.tru; recmap_gt=circ.recgt
+
+    # ── integrated-HU: EXCESS lipid over local muscle; conservation recovers ∫(f_l−bg) without the boundary ──
+    const FIXED_MARGIN_PX = 8.0
+    IFAT=(1-IFL-0.05,IFL,0.05); FAT_AFF=aff_l(mix_hu(IFAT...,E40),mix_hu(IFAT...,E70))   # affine content; vs IFL = decode bias
+    integ = NamedTuple[]
+    for s in isims
+        i40=s.hu40; i70=s.hu70; m2=s.m2; r_mm=s.r; rpx=r_mm/RECON_PX_MM; (cx,cy)=label_centroid(m2,ROD0)
+        qb(i,j)=[1.0,i-cx,j-cy,(i-cx)^2,(j-cy)^2,(i-cx)*(j-cy)]                          # global quadratic muscle bg (cupping)
+        hm=[CartesianIndex(i,j) for i in axes(i40,1),j in axes(i40,2) if m2[i,j]==0x02 && (i-cx)^2+(j-cy)^2≤(60.0/RECON_PX_MM)^2]
+        cg=reduce(vcat,[qb(I[1],I[2])' for I in hm])\[aff_l(Float64(i40[I]),Float64(i70[I])) for I in hm]
+        bgf(i,j)=dot(cg,qb(i,j)); bg0=bgf(cx,cy); truelip=π*r_mm^2*(FAT_AFF-bg0)
+        margins=0.0:1.0:16.0; recov=Float64[]
+        for mg in margins
+            R=rpx+mg; acc=0.0
+            for i in axes(i40,1), j in axes(i40,2)
+                (i-cx)^2+(j-cy)^2≤R^2 || continue; (SOFT_HU_LO<i70[i,j]<SOFT_HU_HI) || continue
+                acc += aff_l(Float64(i40[i,j]),Float64(i70[i,j])) - bgf(i,j)
+            end
+            push!(recov, acc*RECON_PX_MM^2)
+        end
+        bi=findfirst(==(FIXED_MARGIN_PX),margins)
+        push!(integ,(r=r_mm,fl=IFL,truelip=truelip,bg=bg0,naivelip=recov[1],intlip=recov[bi],margins=collect(margins),recov=recov))
+    end
+    Markdown.parse("cal n=$(length(calrois)), R²(f_w)=$(round(r2fit(cw,fwc),digits=3)); **TEST n=$(length(allrois))** ($(count(==(:circular),geomtag)) circular + $(count(==(:sector),geomtag)) sector) — f_w CCC=**$(round(mw.ccc,digits=3))**, f_l CCC=**$(round(ml.ccc,digits=3))**, f_p CCC=**$(round(mp.ccc,digits=3))**; ρ=$(round(ρ,digits=2)); integrated-HU recovers $(round(Int,100*minimum(r.intlip/r.truelip for r in integ)))–$(round(Int,100*maximum(r.intlip/r.truelip for r in integ)))% vs naive $(round(Int,100*minimum(r.naivelip/r.truelip for r in integ)))–$(round(Int,100*maximum(r.naivelip/r.truelip for r in integ)))%.")
 end
 
 # ╔═╡ aaaa0015-0000-4000-8000-000000000015
-md"## 7 · Relationship plots, delivered maps & validation"
+md"## 7 · Figures"
 
 # ╔═╡ aaaa0016-0000-4000-8000-000000000016
-let f=CM.Figure(size=(1100,520)), flcol=[r.fl for r in calrois]
+let f=CM.Figure(size=(600,560)), flcol=[r.fl for r in calrois]
     ax=CM.Axis(f[1,1];xlabel="HU$(Int(E40))",ylabel="HU$(Int(E70))",title="Barycentric triangle · 40 vs 70 keV",aspect=CM.DataAspect())
     CM.poly!(ax,[CM.Point2f(PW...),CM.Point2f(PL...),CM.Point2f(PP...)];color=(:steelblue,0.15),strokecolor=:gray,strokewidth=1)
-    sc=CM.scatter!(ax,m40c,m70c;color=flcol,colormap=:viridis,markersize=7)
+    sc=CM.scatter!(ax,m40c,m70c;color=flcol,colormap=:viridis,markersize=9)
     for (p,t) in ((PW,"W"),(PL,"L"),(PP,"P")); CM.scatter!(ax,[p[1]],[p[2]];marker=:diamond,color=:black,markersize=13); CM.text!(ax,p[1],p[2];text=t,fontsize=16,align=(:center,:bottom)); end
-    CM.Colorbar(f[1,2],sc;label="f_l")
-    CM.Label(f[0,:],"Recon rods fall inside the theoretical W/L/P triangle — recon HU matches theory on v0.8.0 (cond G=$(round(cond([PL[1] PP[1];PL[2] PP[2]]),digits=1)))";fontsize=13,font=:bold)
+    CM.Colorbar(f[1,2],sc;label="true f_l")
+    CM.Label(f[0,:],"Calibration cores fall inside the theoretical W/L/P triangle";fontsize=13,font=:bold)
     safe_save(joinpath(ASSET,"fig1_triangle.png"),f); f
 end
 
 # ╔═╡ aaaa0017-0000-4000-8000-000000000017
-let f=CM.Figure(size=(1100,480)), flcol=[r.fl for r in calrois]
-    for (col,(hu,lab)) in enumerate(((m40c,"HU$(Int(E40))"),(m70c,"HU$(Int(E70))")))
-        ax=CM.Axis(f[1,col];xlabel=lab,ylabel="f_water",title="f_w vs $lab (colored by f_l)")
-        sc=CM.scatter!(ax,hu,fwc;color=flcol,colormap=:viridis,markersize=7); col==2 && CM.Colorbar(f[1,3],sc;label="f_l")
+let f=CM.Figure(size=(1050,460))
+    ax=CM.Axis(f[1,1];xlabel="HU",ylabel="σ (HU)",title="σ(HU) per energy — convex-quadratic")
+    for (hu,sg,cc,e,col) in ((m40c,[r.s40 for r in calrois],sc40,E40,:tomato),(m70c,[r.s70 for r in calrois],sc70,E70,:royalblue))
+        CM.scatter!(ax,hu,sg;color=col,markersize=8,label="$(Int(e)) keV"); g=range(minimum(hu),maximum(hu),100); CM.lines!(ax,g,quad_sigma.(Ref(cc),g);color=col)
     end
-    CM.Label(f[0,:],"Calibration: f_w vs a single energy is a cloud, not a curve — the 2nd energy resolves it";fontsize=13,font=:bold)
-    safe_save(joinpath(ASSET,"fig2_calibration.png"),f); f
+    CM.axislegend(ax;position=:rt)
+    ax2=CM.Axis(f[1,2];xlabel="resid HU$(Int(E40))",ylabel="resid HU$(Int(E70))",title="inter-energy ρ=$(round(ρ,digits=2))")
+    idx=rand(1:length(res40),min(3000,length(res40))); CM.scatter!(ax2,res40[idx],res70[idx];markersize=3,color=(:purple,0.3))
+    safe_save(joinpath(ASSET,"fig2_noise.png"),f); f
 end
 
 # ╔═╡ aaaa0018-0000-4000-8000-000000000018
-let f=CM.Figure(size=(1200,420)), comps=diverse_comps(5,600)
-    fw=[c[1] for c in comps];fl=[c[2] for c in comps];fp=[c[3] for c in comps]
-    for (col,(x,y,xl,yl)) in enumerate(((fw,fl,"f_w","f_l"),(fw,fp,"f_w","f_p"),(fl,fp,"f_l","f_p")))
-        ax=CM.Axis(f[1,col];xlabel=xl,ylabel=yl,title="$xl vs $yl"); CM.scatter!(ax,x,y;markersize=4,color=(:steelblue,0.5))
+let f=CM.Figure(size=(1520,430))
+    ax=CM.Axis(f[1,1];title="VMI 70 keV",aspect=CM.DataAspect(),yreversed=true); CM.hidedecorations!(ax); CM.heatmap!(ax,map70;colormap=:grays,colorrange=(-200,300))
+    for (col,(img,ttl)) in enumerate(((recmap[:,:,1],"f_w"),(recmap[:,:,2],"f_l"),(recmap[:,:,3],"f_p")))
+        ax2=CM.Axis(f[1,col+1];title=ttl,aspect=CM.DataAspect(),yreversed=true); CM.hidedecorations!(ax2); CM.heatmap!(ax2,img;colormap=:jet,colorrange=(0,1))
     end
-    CM.Label(f[0,:],"The three pairwise fraction relations (closure f_w+f_l+f_p=1 is the 3-way constraint)";fontsize=13,font=:bold)
-    safe_save(joinpath(ASSET,"fig3_fraction_pairs.png"),f); f
+    CM.Colorbar(f[1,5];colormap=:jet,colorrange=(0,1),label="volume fraction")
+    CM.Label(f[0,:],"Delivered map — per-voxel decode + σ_f-weighted Huber-TV, boundary-agnostic (lung & bone HU-gated out)";fontsize=13,font=:bold)
+    safe_save(joinpath(ASSET,"fig3_delivered_map.png"),f); f
 end
 
 # ╔═╡ aaaa0019-0000-4000-8000-000000000019
-let f=CM.Figure(size=(1100,480))
-    ax=CM.Axis(f[1,1];xlabel="HU",ylabel="σ (HU)",title="σ(HU) per energy — convex-quadratic fit")
-    for (hu,sg,cc,e,col) in ((m40c,[r.s40 for r in calrois],sc40,E40,:tomato),(m70c,[r.s70 for r in calrois],sc70,E70,:royalblue))
-        CM.scatter!(ax,hu,sg;color=col,markersize=6,label="$(Int(e)) keV"); g=range(minimum(hu),maximum(hu),100); CM.lines!(ax,g,quad_sigma.(Ref(cc),g);color=col)
+let f=CM.Figure(size=(1250,440))
+    hi=findall(!isnan,truemap[:,:,2]); ci=extrema(getindex.(hi,1)); cj=extrema(getindex.(hi,2)); pad=28
+    rI=max(1,ci[1]-pad):min(size(map_m2,1),ci[2]+pad); rJ=max(1,cj[1]-pad):min(size(map_m2,2),cj[2]+pad)
+    for (col,(img,ttl)) in enumerate(((truemap[rI,rJ,2],"true f_l (GT regions)"),(recmap[rI,rJ,2],"honest (per-voxel + TV)"),(recmap_gt[rI,rJ,2],"optimistic (GT-boundary pooled)")))
+        ax=CM.Axis(f[1,col];title=ttl,aspect=CM.DataAspect(),yreversed=true); CM.hidedecorations!(ax); hm=CM.heatmap!(ax,img;colormap=:jet,colorrange=(0,1)); col==3&&CM.Colorbar(f[1,4],hm;label="f_l")
     end
-    CM.axislegend(ax;position=:rt)
-    ax2=CM.Axis(f[1,2];xlabel="residual HU$(Int(E40))",ylabel="residual HU$(Int(E70))",title="inter-energy noise ρ=$(round(ρ,digits=2))")
-    idx=rand(1:length(res40),3000); CM.scatter!(ax2,res40[idx],res70[idx];markersize=3,color=(:purple,0.3))
-    safe_save(joinpath(ASSET,"fig4_noise.png"),f); f
+    CM.Label(f[0,:],"f_l over the heart: honest per-voxel+TV keeps real texture & PVE edges; GT-pooled is flat (uses the boundary we don't have on real fat)";fontsize=12,font=:bold)
+    safe_save(joinpath(ASSET,"fig4_honest_vs_pooled.png"),f); f
 end
 
 # ╔═╡ aaaa0020-0000-4000-8000-000000000020
-let f=CM.Figure(size=(1200,460))
-    aw=[c[1] for c in adipose];al=[c[2] for c in adipose];ap=[c[3] for c in adipose]
-    npdf(x,μ,s)=exp(-(x-μ)^2/(2s^2))/(s*sqrt(2π)); trapz(y,x)=y./sum((y[1:end-1].+y[2:end])./2 .* diff(x))
-    for (col,(d,μ,s,nm,isg)) in enumerate(((aw,mean(aw),std(aw),"f_w Normal",false),(al,mean(al),std(al),"f_l Normal",false),(ap,mean(ap),std(ap),"f_p Gamma",true)))
-        ax=CM.Axis(f[1,col];xlabel=nm[1:3],title=nm); CM.hist!(ax,d;bins=40,normalization=:pdf,color=(:gray,0.5))
-        g=collect(range(max(1e-4,minimum(d)),maximum(d),200))
-        if isg; α=μ^2/s^2;θ=s^2/μ; sh=[x^(α-1)*exp(-x/θ) for x in g]; CM.lines!(ax,g,trapz(sh,g);color=:crimson,linewidth=2)
-        else CM.lines!(ax,g,npdf.(g,μ,s);color=:crimson,linewidth=2); end
+let f=CM.Figure(size=(1300,460))
+    for (col,(t,p,mt,sem,nm)) in enumerate(((tfw,pfw,mw,semfw,"f_w"),(tfl,pfl,ml,semfl,"f_l"),(tfp,pfp,mp,semfp,"f_p")))
+        lo=min(minimum(t),minimum(p));hi=max(maximum(t),maximum(p))
+        ax=CM.Axis(f[1,col];xlabel="true $nm",ylabel="recovered",title=nm,aspect=CM.DataAspect(),limits=(lo,hi,lo,hi))
+        CM.lines!(ax,[lo,hi],[lo,hi];color=:gray,linestyle=:dash)
+        CM.errorbars!(ax,t,p,sem;color=(:black,0.55),whiskerwidth=8,linewidth=1.2)   # capped error bars, all 3 materials
+        CM.scatter!(ax,t,p;color=[g==:circular ? :steelblue : :orange for g in geomtag],markersize=8)
+        CM.text!(ax,lo+0.03*(hi-lo),hi-0.05*(hi-lo);text=@sprintf("CCC %.3f\nslope %.2f\nRMSE %.3f\nR² %.3f",mt.ccc,mt.slope,mt.rmse,mt.r2),align=(:left,:top),fontsize=11)
     end
-    CM.Label(f[0,:],"Adipose prior (Woodard 1986): Normal(f_w)·Normal(f_l)·Gamma(f_p)";fontsize=13,font=:bold)
-    safe_save(joinpath(ASSET,"fig5_prior.png"),f); f
+    CM.Label(f[0,:],"Recovered vs true (per-voxel decode · eroded-core pool) — blue=circular, orange=sector; error bars = SE of the ROI mean";fontsize=12,font=:bold)
+    safe_save(joinpath(ASSET,"fig5_scatter.png"),f); f
 end
 
 # ╔═╡ aaaa0021-0000-4000-8000-000000000021
-let f=CM.Figure(size=(1200,1050)), names=("f_w","f_l","f_p")
-    for row in 1:3
-        tt=truemap_c[:,:,row]; rr=recmap_c[:,:,row]; er=rr.-tt
-        for (col,(img,ttl,cr,cm)) in enumerate(((tt,"true $(names[row])",(0,1),:jet),(rr,"recovered (pooled)",(0,1),:jet),(er,"error",(-0.1,0.1),:balance)))
-            ax=CM.Axis(f[row,col];title=ttl,aspect=CM.DataAspect()); CM.hidedecorations!(ax)
-            hm=CM.heatmap!(ax,img;colormap=cm,colorrange=cr); (col==3)&&CM.Colorbar(f[row,4],hm)
-        end
-    end
-    CM.Label(f[0,:],"Delivered per-region pooled maps vs ground truth (13 ø28mm rods, ±0.1 error scale)";fontsize=14,font=:bold)
-    safe_save(joinpath(ASSET,"fig6_maps.png"),f); f
+let f=CM.Figure(size=(1250,470)), rr=[r.r for r in integ]
+    ax=CM.Axis(f[1,1];xlabel="fat object radius (mm)",ylabel="recovered / true excess lipid",title="Object-extent measure vs integrated-HU")
+    CM.scatterlines!(ax,rr,[r.naivelip/r.truelip for r in integ];color=:tomato,markersize=13,label="naive (object extent)")
+    CM.scatterlines!(ax,rr,[r.intlip/r.truelip for r in integ];color=:seagreen,markersize=13,label="integrated (+$(Int(FIXED_MARGIN_PX)) px skirt)")
+    CM.hlines!(ax,[1.0];color=:gray,linestyle=:dash); CM.axislegend(ax;position=:rb)
+    ax2=CM.Axis(f[1,2];xlabel="integration margin (recon-px)",ylabel="recovered / true",title="Conservation vs margin")
+    for r in integ; CM.lines!(ax2,r.margins,r.recov./r.truelip;linewidth=2,label=@sprintf("r=%.0f mm",r.r)); end
+    CM.hlines!(ax2,[1.0];color=:gray,linestyle=:dash); CM.vlines!(ax2,[FIXED_MARGIN_PX];color=(:black,0.3),linestyle=:dot); CM.axislegend(ax2;position=:rb)
+    CM.Label(f[0,:],"Partial volume makes the object-extent measure under-report small fat; integrated-HU recovers it via conservation (bg = local muscle)";fontsize=12,font=:bold)
+    safe_save(joinpath(ASSET,"fig6_integrated_hu.png"),f); f
 end
 
 # ╔═╡ aaaa0022-0000-4000-8000-000000000022
-let f=CM.Figure(size=(1300,460))
-    for (col,(t,p,m,nm)) in enumerate(((tfw,pfw,mw,"f_w"),(tfl,pfl,ml,"f_l"),(tfp,pfp,mp,"f_p")))
-        lo=min(minimum(t),minimum(p));hi=max(maximum(t),maximum(p))
-        ax=CM.Axis(f[1,col];xlabel="true $nm",ylabel="recovered",title="$nm  CCC=$(round(m.ccc,digits=2))",aspect=CM.DataAspect(),limits=(lo,hi,lo,hi))
-        CM.lines!(ax,[lo,hi],[lo,hi];color=:gray,linestyle=:dash)
-        col==1 && CM.errorbars!(ax,t,p,semfw;color=(:steelblue,0.3),whiskerwidth=0)
-        CM.scatter!(ax,t,p;color=[g==:circular ? :steelblue : :orange for g in geomtag],markersize=6)
-        CM.text!(ax,lo+0.02*(hi-lo),hi-0.05*(hi-lo);text=@sprintf("slope %.2f\nRMSE %.3f\nR² %.2f",m.slope,m.rmse,m.r2),align=(:left,:top),fontsize=11)
+let f=CM.Figure(size=(1520,430))
+    ax=CM.Axis(f[1,1];title="VMI 70 keV (sector)",aspect=CM.DataAspect(),yreversed=true); CM.hidedecorations!(ax); CM.heatmap!(ax,smap70;colormap=:grays,colorrange=(-200,300))
+    for (col,(img,ttl)) in enumerate(((sect.rec[:,:,1],"f_w"),(sect.rec[:,:,2],"f_l"),(sect.rec[:,:,3],"f_p")))
+        ax2=CM.Axis(f[1,col+1];title=ttl,aspect=CM.DataAspect(),yreversed=true); CM.hidedecorations!(ax2); CM.heatmap!(ax2,img;colormap=:jet,colorrange=(0,1))
     end
-    CM.Label(f[0,:],"Recovered vs true (blue=circular, orange=sector) — pooled ROI, error bars = SEM (f_w)";fontsize=13,font=:bold)
-    safe_save(joinpath(ASSET,"fig7_scatter.png"),f); f
+    CM.Colorbar(f[1,5];colormap=:jet,colorrange=(0,1),label="volume fraction")
+    CM.Label(f[0,:],"Delivered map — sector validation phantom (per-voxel decode + σ_f Huber-TV, boundary-agnostic)";fontsize=13,font=:bold)
+    safe_save(joinpath(ASSET,"fig7_delivered_map_sector.png"),f); f
 end
 
 # ╔═╡ aaaa0023-0000-4000-8000-000000000023
-let f=CM.Figure(size=(1100,460))
-    for (col,(d,e)) in enumerate(((dHU40,E40),(dHU70,E70)))
-        ax=CM.Axis(f[1,col];xlabel="ROI |ΔHU| at $(Int(e)) keV",ylabel="count",title="detectability $(Int(e)) keV — $(round(100mean(d.<5),digits=0))% < 5 HU")
-        CM.hist!(ax,d;bins=30,color=(:teal,0.6)); CM.vlines!(ax,[5.0];color=:red,linestyle=:dash,label="5 HU"); CM.axislegend(ax)
-    end
-    safe_save(joinpath(ASSET,"fig8_detectability.png"),f); f
-end
-
-# ╔═╡ aaaa0024-0000-4000-8000-000000000024
-let f=CM.Figure(size=(900,460)), pxmm=380/512
-    radii=4:2:14; areas=Float64[];noise=Float64[];sems=Float64[]
-    for r in radii
-        push!(areas, π*(r*pxmm)^2); vs=Float64[];ss=Float64[]
-        for lab in ROD0:(ROD0+NROD-1)
-            idx=findall(==(UInt8(lab)),map_m2); isempty(idx)&&continue
-            cx=mean(getindex.(idx,1));cy=mean(getindex.(idx,2))
-            ci=[I for I in idx if (I[1]-cx)^2+(I[2]-cy)^2≤r^2]; length(ci)<4&&continue
-            fw=[decode(Float64(map40[I]),Float64(map70[I]))[1] for I in ci]
-            push!(vs,std(fw)); push!(ss,std(fw)/sqrt(length(ci)))
+let f=CM.Figure(size=(1250,820))
+    for (row,(Dl,tag)) in enumerate(((circ,"circular"),(sect,"sector")))
+        hi=findall(!isnan,Dl.tru[:,:,2]); ci=extrema(getindex.(hi,1)); cj=extrema(getindex.(hi,2)); pad=25
+        rI=max(1,ci[1]-pad):min(size(Dl.tru,1),ci[2]+pad); rJ=max(1,cj[1]-pad):min(size(Dl.tru,2),cj[2]+pad)
+        tl=Dl.tru[rI,rJ,2]; rl=Dl.rec[rI,rJ,2]; er=[isnan(tl[i,j]) ? NaN : rl[i,j]-tl[i,j] for i in axes(tl,1),j in axes(tl,2)]
+        for (col,(img,t2,cr,cm)) in enumerate(((tl,"true f_l",(0,1),:jet),(rl,"recovered f_l (per-voxel+TV)",(0,1),:jet),(er,"error",(-0.15,0.15),:balance)))
+            ax=CM.Axis(f[row,col];title=(row==1 ? t2 : ""),ylabel=(col==1 ? tag : ""),aspect=CM.DataAspect(),yreversed=true)
+            CM.hidedecorations!(ax;label=false); hm=CM.heatmap!(ax,img;colormap=cm,colorrange=cr); (col==3)&&CM.Colorbar(f[row,4],hm)
         end
-        push!(noise,mean(vs)); push!(sems,mean(ss))
     end
-    ax=CM.Axis(f[1,1];xlabel="ROI area (mm²)",ylabel="f_w uncertainty",title="Bigger ROI → tighter pooled estimate (√N); ø28mm rod ≈ $(round(π*(RODMM/2)^2,digits=0)) mm²")
-    CM.lines!(ax,areas,noise;color=:tomato); CM.scatter!(ax,areas,noise;color=:tomato,label="per-voxel σ(f_w)")
-    CM.lines!(ax,areas,sems;color=:royalblue); CM.scatter!(ax,areas,sems;color=:royalblue,label="pooled SEM(f_w)")
-    CM.vlines!(ax,[200.0];color=:gray,linestyle=:dash,label="200 mm²"); CM.axislegend(ax;position=:rt)
-    safe_save(joinpath(ASSET,"fig9_roi_area.png"),f); f
+    CM.Label(f[0,:],"Ground truth vs recovered (per-voxel + TV) vs error — f_l, circular & sector validation phantoms";fontsize=13,font=:bold)
+    safe_save(joinpath(ASSET,"fig8_gt_rec_error.png"),f); f
 end
 
 # ╔═╡ aaaa0025-0000-4000-8000-000000000025
-md"""## 8 · Conclusion
+Markdown.parse("""
+## 8 · Conclusion
 
 | fraction | CCC | slope | RMSE |
 |---|---|---|---|
-| **f_water** | **$(round(mw.ccc,digits=2))** | $(round(mw.slope,digits=2)) | $(round(mw.rmse,digits=3)) |
-| f_lipid | $(round(ml.ccc,digits=2)) | $(round(ml.slope,digits=2)) | $(round(ml.rmse,digits=3)) |
-| f_protein | $(round(mp.ccc,digits=2)) | $(round(mp.slope,digits=2)) | $(round(mp.rmse,digits=3)) |
+| **f_water** | **$(round(mw.ccc,digits=3))** | $(round(mw.slope,digits=2)) | $(round(mw.rmse,digits=3)) |
+| f_lipid | $(round(ml.ccc,digits=3)) | $(round(ml.slope,digits=2)) | $(round(ml.rmse,digits=3)) |
+| f_protein | $(round(mp.ccc,digits=3)) | $(round(mp.slope,digits=2)) | $(round(mp.rmse,digits=3)) |
 
-Detectability: **$(round(100mean(dHU70.<5),digits=0))% of ROIs < 5 HU at 70 keV** (mean $(round(mean(dHU70),digits=1)) HU);
-$(round(mean(dHU40),digits=1)) HU at 40 keV.
+Held-out **circular + sector** (n=$(length(allrois))). Detectability: **$(round(Int,100mean(dHU70.<5)))% of ROIs < 5 HU at 70 keV** (mean $(round(mean(dHU70),digits=1)) HU).
 
-**Conclusion.** With a **quantitative** 2-basis DECT simulation (BasisSimulator v0.8.0, `:dd_fast`
-projector — pure lipid −205 vs theoretical −213) and ø28 mm rods (ROI ≈ 250 mm²), water/lipid/protein
-volume fractions are all recovered with **CCC ≈ 0.99** and ROI accuracy within ~1 HU at 70 keV. The decode
-is a simple calibration surface fit from known mixtures; the recon is linear-additive (calibration in-sample
-R²(f_w) = $(round(r2cal(cw,fwc),digits=2))), so the triangle is well-conditioned and no strong prior is
-needed. Two lessons: (1) **validate the simulator against pure-material theoretical HU** before trusting a
-decode — the earlier apparent "f_water ceiling" was entirely the old v0.2.1 projector compressing non-water
-HU by ~50 HU; (2) **ROI area matters** — per-voxel σ(f_w) is irreducible, but pooling over a ≥200 mm² ROI
-drives SEM below 0.025 (fig 9).
-"""
+**Point accuracy** is excellent on the eroded interior cores (all CCC ≈ 0.99) and, as expected on a uniform
+phantom, per-voxel vs pool-then-decode barely differ there. The honesty cost of the ground-truth boundary shows
+up in the **delivered map** (fig 3–4): the boundary-agnostic per-voxel+TV map keeps real texture and PVE edges,
+whereas the GT-pooled map is flat because it uses a boundary real fat doesn't provide.
+
+**Integrated-HU** (fig 6) is the answer to partial-volume underestimation of small fat: the object-extent
+measure loses $(round(Int,100-100*minimum(r.naivelip/r.truelip for r in integ)))% of a 4 mm fat object, while
+integrating an affine decode over the object+skirt with a local muscle background recovers it to
+$(round(Int,100*minimum(r.intlip/r.truelip for r in integ)))–$(round(Int,100*maximum(r.intlip/r.truelip for r in integ)))% via mass conservation. The affine decode carries a separate
+$(round(Int,100*(FAT_AFF/IFL-1)))% composition bias at f_l=$(IFL) (linearization error), common to both estimators. Real-data caveats:
+integrated-HU fixes the *numerator* (total lipid) — a region *mean* still needs a segmentation denominator; the
+local background must be a field (not a constant) because PVAT muscle isn't uniform; and conservation is exact
+only for linear/FBP recon, so a clinical DLIR/QIR transfer must re-earn it empirically.
+""")
 
 # ╔═╡ Cell order:
 # ╟─aaaa0002-0000-4000-8000-000000000002
-# ╠═aaaa0001-0000-4000-8000-000000000001
 # ╟─aaaa0003-0000-4000-8000-000000000003
+# ╠═aaaa0001-0000-4000-8000-000000000001
 # ╠═aaaa0004-0000-4000-8000-000000000004
 # ╟─aaaa0005-0000-4000-8000-000000000005
 # ╠═aaaa0006-0000-4000-8000-000000000006
@@ -444,5 +552,4 @@ drives SEM below 0.025 (fig 9).
 # ╠═aaaa0021-0000-4000-8000-000000000021
 # ╠═aaaa0022-0000-4000-8000-000000000022
 # ╠═aaaa0023-0000-4000-8000-000000000023
-# ╠═aaaa0024-0000-4000-8000-000000000024
 # ╟─aaaa0025-0000-4000-8000-000000000025
