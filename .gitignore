@@ -13,3 +13,4 @@ LocalPreferences.toml
 
 # scratch
 /scratch/
+*.jls
