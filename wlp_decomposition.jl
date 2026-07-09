@@ -265,33 +265,39 @@ end
 
 # ╔═╡ aaaa0013-0000-4000-8000-000000000013
 md"""## 6 · Run sims + calibrate + decode (cached)
-4 calibration + 3 circular-test + 1 map thorax; 4 centred integrated-HU sims; 2 sector-test + 1 sector-map.
-First run ≈ 15 min on GPU; results cache to `wlp_*_cache_v2.jls`. Delete those to re-simulate."""
+4 calibration + 1 map thorax; **5 circular-test + 4 sector-test** held-out (n = 65 + 64 = 129 ROIs); 4 centred
+integrated-HU sims. First run ≈ 20 min on GPU; results cache to `wlp_*_cache_v2.jls`. Delete those to re-sim."""
 
 # ╔═╡ aaaa0014-0000-4000-8000-000000000014
 begin
-    const CACHE  = joinpath(@__DIR__, "wlp_sim_cache_v2.jls")
+    const CACHE  = joinpath(@__DIR__, "wlp_sim_cache_v2.jls")     # calibration + delivered-map thorax
+    const TCACHE = joinpath(@__DIR__, "wlp_test_cache_v2.jls")    # circular held-out test (5 sims)
     const ICACHE = joinpath(@__DIR__, "wlp_int_cache_v2.jls")
     const SCACHE = joinpath(@__DIR__, "wlp_sect_cache_v2.jls")
     const CORE_RPX = round(Int, INS_R/RECON_PX_MM - EROSION_PX)   # eroded interior core ≈ 225 mm²
     const IFL = 0.85
-    # ── circular calibration + test + delivered-map thorax ──
+    # one packed-thorax acquisition → NHEART eroded insert cores (shared by calibration + circular test)
+    _cores(seed, cseed) = begin
+        comps = diverse_comps(cseed, NHEART); ph = build_thorax(comps); acq = run_acq(ph.gpu; seed=seed)
+        lc = Dict(ROD0-1+k => comps[k] for k in 1:NHEART); r = collect_rois(acq, ph.cpu, lc; radius_px=CORE_RPX).rois; ph=nothing; GC.gc(true); r
+    end
+    # ── calibration (4 sims) + delivered-map thorax ──
     if !isfile(CACHE)
-        println("── running thorax sims (first time; ~9 min) ──"); Random.seed!(1)
-        thorax_cores(seed, cseed) = begin
-            comps = diverse_comps(cseed, NHEART); ph = build_thorax(comps); acq = run_acq(ph.gpu; seed=seed)
-            lc = Dict(ROD0-1+k => comps[k] for k in 1:NHEART)
-            rois = collect_rois(acq, ph.cpu, lc; radius_px=CORE_RPX).rois; ph=nothing; GC.gc(true); rois
-        end
-        calrois = NamedTuple[]; for (si,seed) in enumerate((11,12,13,14)); append!(calrois, thorax_cores(seed, 1000+si)); end
-        testrois = NamedTuple[]; for (si,seed) in enumerate((201,202,203)); append!(testrois, thorax_cores(seed, 91260708+si)); end
+        println("── running calibration + map thorax ──"); Random.seed!(1)
+        calrois = NamedTuple[]; for (si,seed) in enumerate((11,12,13,14)); append!(calrois, _cores(seed, 1000+si)); end
         mcomps = diverse_comps(777, NHEART); mph = build_thorax(mcomps); macq = run_acq(mph.gpu; seed=999); mmid = size(macq.hu70,3)÷2+1
         mrc = roi_cores(mph.cpu, macq.geom, (RECON_N,RECON_N,3), collect(ROD0:(ROD0+NHEART-1)))
         map40 = Array(macq.hu40[:,:,mmid]); map70 = Array(macq.hu70[:,:,mmid]); map_m2 = mrc.m2; mph=nothing; GC.gc(true)
-        serialize(CACHE, (; calrois, testrois, map40, map70, map_m2, mcomps))
+        serialize(CACHE, (; calrois, map40, map70, map_m2, mcomps))
     end
-    D = deserialize(CACHE); calrois, testrois = D.calrois, D.testrois
-    map40, map70, map_m2, mcomps = D.map40, D.map70, D.map_m2, D.mcomps
+    Dm = deserialize(CACHE); calrois = Dm.calrois; map40, map70, map_m2, mcomps = Dm.map40, Dm.map70, Dm.map_m2, Dm.mcomps
+    # ── circular held-out test (5 sims → 65 ROIs; own cache) ──
+    if !isfile(TCACHE)
+        println("── running circular test thorax (5 sims) ──")
+        testrois = NamedTuple[]; for (si,seed) in enumerate((201,202,203,204,205)); append!(testrois, _cores(seed, 91260708+si)); end
+        serialize(TCACHE, (; testrois))
+    end
+    testrois = deserialize(TCACHE).testrois
     # ── integrated-HU size series (one centred fat insert per sim) ──
     if !isfile(ICACHE)
         println("── running integrated-HU size series ──")
@@ -308,7 +314,7 @@ begin
     if !isfile(SCACHE)
         println("── running sector validation thorax ──")
         sectrois = NamedTuple[]
-        for (si,seed) in enumerate((401,402))
+        for (si,seed) in enumerate((401,402,405,406))                # 4 sims → 64 ROIs
             sc = diverse_comps(70260708+si, NSECT); sp = build_thorax(sc; sectors=(SECT_NANG,SECT_NRAD)); sa = run_acq(sp.gpu; seed=seed)
             lc = Dict(ROD0-1+k => sc[k] for k in 1:NSECT); append!(sectrois, collect_rois(sa, sp.cpu, lc; radius_px=7).rois); sp=nothing; GC.gc(true)
         end
@@ -487,18 +493,42 @@ let f=CM.Figure(size=(1520,430))
 end
 
 # ╔═╡ aaaa0023-0000-4000-8000-000000000023
-let f=CM.Figure(size=(1250,820))
-    for (row,(Dl,tag)) in enumerate(((circ,"circular"),(sect,"sector")))
-        hi=findall(!isnan,Dl.tru[:,:,2]); ci=extrema(getindex.(hi,1)); cj=extrema(getindex.(hi,2)); pad=25
-        rI=max(1,ci[1]-pad):min(size(Dl.tru,1),ci[2]+pad); rJ=max(1,cj[1]-pad):min(size(Dl.tru,2),cj[2]+pad)
-        tl=Dl.tru[rI,rJ,2]; rl=Dl.rec[rI,rJ,2]; er=[isnan(tl[i,j]) ? NaN : rl[i,j]-tl[i,j] for i in axes(tl,1),j in axes(tl,2)]
-        for (col,(img,t2,cr,cm)) in enumerate(((tl,"true f_l",(0,1),:jet),(rl,"recovered f_l (per-voxel+TV)",(0,1),:jet),(er,"error",(-0.15,0.15),:balance)))
-            ax=CM.Axis(f[row,col];title=(row==1 ? t2 : ""),ylabel=(col==1 ? tag : ""),aspect=CM.DataAspect(),yreversed=true)
-            CM.hidedecorations!(ax;label=false); hm=CM.heatmap!(ax,img;colormap=cm,colorrange=cr); (col==3)&&CM.Colorbar(f[row,4],hm)
+# GT vs recovered vs |error| for ALL THREE materials, everything on ONE jet 0–1 scale (|error| on the same
+# 0–1 scale reads honestly small vs the fraction range). Circular phantom.
+let f=CM.Figure(size=(1150,1050)), Dl=circ
+    hi=findall(!isnan,Dl.tru[:,:,2]); ci=extrema(getindex.(hi,1)); cj=extrema(getindex.(hi,2)); pad=25
+    rI=max(1,ci[1]-pad):min(size(Dl.tru,1),ci[2]+pad); rJ=max(1,cj[1]-pad):min(size(Dl.tru,2),cj[2]+pad)
+    for (row,mat) in enumerate(("f_w","f_l","f_p"))
+        tl=Dl.tru[rI,rJ,row]; rf=Dl.rec[rI,rJ,row]
+        rl=[isnan(tl[i,j]) ? NaN : rf[i,j] for i in axes(tl,1),j in axes(tl,2)]
+        er=[isnan(tl[i,j]) ? NaN : abs(rf[i,j]-tl[i,j]) for i in axes(tl,1),j in axes(tl,2)]
+        for (col,(img,ttl)) in enumerate(((tl,"true"),(rl,"recovered"),(er,"|error|")))
+            ax=CM.Axis(f[row,col];title=(row==1 ? ttl : ""),ylabel=(col==1 ? mat : ""),aspect=CM.DataAspect(),yreversed=true)
+            CM.hidedecorations!(ax;label=false); CM.heatmap!(ax,img;colormap=:jet,colorrange=(0,1))
         end
     end
-    CM.Label(f[0,:],"Ground truth vs recovered (per-voxel + TV) vs error — f_l, circular & sector validation phantoms";fontsize=13,font=:bold)
-    safe_save(joinpath(ASSET,"fig8_gt_rec_error.png"),f); f
+    CM.Colorbar(f[:,4];colormap=:jet,colorrange=(0,1),label="fraction (true/recovered) · |error| on the same 0–1 scale")
+    CM.Label(f[0,:],"Circular phantom — true vs recovered (per-voxel+TV) vs |error|, f_w / f_l / f_p, all jet on 0–1";fontsize=13,font=:bold)
+    safe_save(joinpath(ASSET,"fig8_gt_rec_error_circular.png"),f); f
+end
+
+# ╔═╡ aaaa0024-0000-4000-8000-000000000024
+# Same triad for the SECTOR validation phantom (held-out shape).
+let f=CM.Figure(size=(1150,1050)), Dl=sect
+    hi=findall(!isnan,Dl.tru[:,:,2]); ci=extrema(getindex.(hi,1)); cj=extrema(getindex.(hi,2)); pad=25
+    rI=max(1,ci[1]-pad):min(size(Dl.tru,1),ci[2]+pad); rJ=max(1,cj[1]-pad):min(size(Dl.tru,2),cj[2]+pad)
+    for (row,mat) in enumerate(("f_w","f_l","f_p"))
+        tl=Dl.tru[rI,rJ,row]; rf=Dl.rec[rI,rJ,row]
+        rl=[isnan(tl[i,j]) ? NaN : rf[i,j] for i in axes(tl,1),j in axes(tl,2)]
+        er=[isnan(tl[i,j]) ? NaN : abs(rf[i,j]-tl[i,j]) for i in axes(tl,1),j in axes(tl,2)]
+        for (col,(img,ttl)) in enumerate(((tl,"true"),(rl,"recovered"),(er,"|error|")))
+            ax=CM.Axis(f[row,col];title=(row==1 ? ttl : ""),ylabel=(col==1 ? mat : ""),aspect=CM.DataAspect(),yreversed=true)
+            CM.hidedecorations!(ax;label=false); CM.heatmap!(ax,img;colormap=:jet,colorrange=(0,1))
+        end
+    end
+    CM.Colorbar(f[:,4];colormap=:jet,colorrange=(0,1),label="fraction (true/recovered) · |error| on the same 0–1 scale")
+    CM.Label(f[0,:],"Sector phantom — true vs recovered (per-voxel+TV) vs |error|, f_w / f_l / f_p, all jet on 0–1";fontsize=13,font=:bold)
+    safe_save(joinpath(ASSET,"fig9_gt_rec_error_sector.png"),f); f
 end
 
 # ╔═╡ aaaa0025-0000-4000-8000-000000000025
@@ -552,4 +582,5 @@ only for linear/FBP recon, so a clinical DLIR/QIR transfer must re-earn it empir
 # ╠═aaaa0021-0000-4000-8000-000000000021
 # ╠═aaaa0022-0000-4000-8000-000000000022
 # ╠═aaaa0023-0000-4000-8000-000000000023
+# ╠═aaaa0024-0000-4000-8000-000000000024
 # ╟─aaaa0025-0000-4000-8000-000000000025
