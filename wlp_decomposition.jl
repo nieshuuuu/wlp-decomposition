@@ -502,13 +502,13 @@ let f=CM.Figure(size=(1320,1050)), Dl=circ
         tl=Dl.tru[rI,rJ,row]; rf=Dl.rec[rI,rJ,row]
         rl=[isnan(tl[i,j]) ? NaN : rf[i,j] for i in axes(tl,1),j in axes(tl,2)]
         er=[isnan(tl[i,j]) ? NaN : rf[i,j]-tl[i,j] for i in axes(tl,1),j in axes(tl,2)]
-        for (col,(img,ttl,cm,cr)) in enumerate(((tl,"true",:jet,(0,1)),(rl,"recovered",:jet,(0,1)),(er,"error",CM.Reverse(:RdBu),(-0.15,0.15))))
+        for (col,(img,ttl,cm,cr)) in enumerate(((tl,"true",:jet,(0,1)),(rl,"recovered",:jet,(0,1)),(er,"error",CM.Reverse(:RdBu),(-0.3,0.3))))
             ax=CM.Axis(f[row,col];title=(row==1 ? ttl : ""),ylabel=(col==1 ? mat : ""),aspect=CM.DataAspect(),yreversed=true)
             CM.hidedecorations!(ax;label=false); CM.heatmap!(ax,img;colormap=cm,colorrange=cr)
         end
     end
     CM.Colorbar(f[:,4];colormap=:jet,colorrange=(0,1),label="fraction (true / recovered)")
-    CM.Colorbar(f[:,5];colormap=CM.Reverse(:RdBu),colorrange=(-0.15,0.15),label="error (recovered − true)")
+    CM.Colorbar(f[:,5];colormap=CM.Reverse(:RdBu),colorrange=(-0.3,0.3),label="error (recovered − true)")
     CM.Label(f[0,:],"Circular phantom — true & recovered (jet 0–1) vs error (blue–white–red), f_w / f_l / f_p";fontsize=13,font=:bold)
     safe_save(joinpath(ASSET,"fig8_gt_rec_error_circular.png"),f); f
 end
@@ -522,13 +522,13 @@ let f=CM.Figure(size=(1320,1050)), Dl=sect
         tl=Dl.tru[rI,rJ,row]; rf=Dl.rec[rI,rJ,row]
         rl=[isnan(tl[i,j]) ? NaN : rf[i,j] for i in axes(tl,1),j in axes(tl,2)]
         er=[isnan(tl[i,j]) ? NaN : rf[i,j]-tl[i,j] for i in axes(tl,1),j in axes(tl,2)]
-        for (col,(img,ttl,cm,cr)) in enumerate(((tl,"true",:jet,(0,1)),(rl,"recovered",:jet,(0,1)),(er,"error",CM.Reverse(:RdBu),(-0.15,0.15))))
+        for (col,(img,ttl,cm,cr)) in enumerate(((tl,"true",:jet,(0,1)),(rl,"recovered",:jet,(0,1)),(er,"error",CM.Reverse(:RdBu),(-0.3,0.3))))
             ax=CM.Axis(f[row,col];title=(row==1 ? ttl : ""),ylabel=(col==1 ? mat : ""),aspect=CM.DataAspect(),yreversed=true)
             CM.hidedecorations!(ax;label=false); CM.heatmap!(ax,img;colormap=cm,colorrange=cr)
         end
     end
     CM.Colorbar(f[:,4];colormap=:jet,colorrange=(0,1),label="fraction (true / recovered)")
-    CM.Colorbar(f[:,5];colormap=CM.Reverse(:RdBu),colorrange=(-0.15,0.15),label="error (recovered − true)")
+    CM.Colorbar(f[:,5];colormap=CM.Reverse(:RdBu),colorrange=(-0.3,0.3),label="error (recovered − true)")
     CM.Label(f[0,:],"Sector phantom — true & recovered (jet 0–1) vs error (blue–white–red), f_w / f_l / f_p";fontsize=13,font=:bold)
     safe_save(joinpath(ASSET,"fig9_gt_rec_error_sector.png"),f); f
 end
