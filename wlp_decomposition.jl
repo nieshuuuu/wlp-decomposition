@@ -13,7 +13,7 @@ on a **stadium QRM-thorax phantom** (faithful PCATSim geometry: two lungs split 
 ribs, spine, and a heart cavity holding the material inserts). Everything is inline (the only data file is the
 Woodard adipose CSV for the prior): mix materials by volume fraction, simulate 80/140-kVp DECT with
 [BasisSimulator.jl](https://github.com/MolloiLab/BasisSimulator.jl) **(v0.8.0, `:dd_fast`)**, synthesize VMI at
-**70 and 150 keV** (this branch; `WLP_PAIR` knob), and invert.
+**70 and 150 keV** (the `WLP_PAIR` knob; 150 keV is a clinically standard VMI), and invert.
 
 **Two complementary products.**
 1. A **quadratic calibration surface** ``f=\\mathrm{poly}_2(\\mathrm{HU}_{40},\\mathrm{HU}_{70})`` for per-voxel
@@ -551,6 +551,14 @@ Markdown.parse("""
 | f_protein | $(round(mp.ccc,digits=3)) | $(round(mp.slope,digits=2)) | $(round(mp.rmse,digits=3)) |
 
 Held-out **circular + sector** (n=$(length(allrois))). Detectability: **$(round(Int,100mean(dHU70.<5)))% of ROIs < 5 HU at $(Int(E70)) keV** (mean $(round(mean(dHU70),digits=1)) HU).
+
+**keV pair — $(Int(E40))/$(Int(E70)).** This pair is intentionally ill-conditioned (150 keV is a clinically
+standard VMI, but the two energies sit above the photoelectric-rich low-keV regime): the W/L/P triangle is a
+near-collinear sliver, **cond(G) = $(round(cond([PL[1]-PW[1] PP[1]-PW[1]; PL[2]-PW[2] PP[2]-PW[2]]),digits=1))**
+(≈3.5× a low-keV pair). Yet the held-out **ROI CCC is unaffected** — the √N eroded-core pooling absorbs the
+per-voxel conditioning penalty, and the inter-energy noise correlation ρ=$(round(ρ,digits=2)) is low enough to
+help the separation. The penalty surfaces only in the per-voxel maps and the integrated-HU total; conditioning
+number alone overpredicts it. The pair is a single `WLP_PAIR` knob.
 
 **Point accuracy** is excellent on the eroded interior cores (all CCC ≈ 0.99) and, as expected on a uniform
 phantom, per-voxel vs pool-then-decode barely differ there. The honesty cost of the ground-truth boundary shows
