@@ -53,15 +53,6 @@ Dm === nothing || variant("calib", Dm.map40, Dm.map70, Dm.map_m2, Dm.mcomps)
 DS = cache("sect")
 DS === nothing || variant("sector", DS.smap40, DS.smap70, DS.smap_m2, DS.scomps)
 
-# ── integrated-HU size series (one centred fat insert per radius) ──
-DI = cache("int")
-if DI !== nothing
-    for s in DI.isims
-        variant("intfat_r$(Int(round(s.r)))mm", s.hu40, s.hu70, s.m2,
-                [(1 - 0.85 - 0.05, 0.85, 0.05)])   # fixed insert comp (see notebook IFL)
-    end
-end
-
 # README with ImageJ import recipe
 open(joinpath(OUT, "README_imagej.txt"), "w") do io
     print(io, """
