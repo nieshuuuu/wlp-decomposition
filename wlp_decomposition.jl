@@ -13,7 +13,7 @@ on a **stadium QRM-thorax phantom** (faithful PCATSim geometry: two lungs split 
 ribs, spine, and a heart cavity holding the material inserts). Everything is inline (the only data file is the
 Woodard adipose CSV for the prior): mix materials by volume fraction, simulate 80/140-kVp DECT with
 [BasisSimulator.jl](https://github.com/MolloiLab/BasisSimulator.jl) **(v0.8.0, `:dd_fast`)**, synthesize VMI at
-**40 and 70 keV**, and invert.
+**70 and 150 keV** (this branch; `WLP_PAIR` knob), and invert.
 
 **Two complementary products.**
 1. A **quadratic calibration surface** ``f=\\mathrm{poly}_2(\\mathrm{HU}_{40},\\mathrm{HU}_{70})`` for per-voxel
@@ -72,7 +72,8 @@ begin
     end
     theo_hu(mat, E) = (μw = BS.compute_μ_at_energy(WATER, E); 1000.0*(BS.compute_μ_at_energy(mat, E) - μw)/μw)
     mix_hu(fw, fl, fp, E) = theo_hu(wlp_material(fw,fl,fp), E)
-    const E40, E70 = 40.0, 70.0
+    const WLP_PAIR = (70.0, 150.0)        # ← the keV pair knob (this branch tests 70/150; main uses 40/70)
+    const E40, E70 = WLP_PAIR             # historical slot names: E40=low, E70=high energy of the pair
     const PL = (theo_hu(LIPID,E40), theo_hu(LIPID,E70)); const PP = (theo_hu(PROTEIN,E40), theo_hu(PROTEIN,E70)); const PW = (0.0, 0.0)
     md"Endpoints (theoretical HU): water=(0,0), lipid=$(round.(PL,digits=0)), protein=$(round.(PP,digits=0))."
 end
@@ -107,7 +108,7 @@ Faithful PCATSim geometry: fat-ring/muscle/lung **stadiums**, two lungs split by
 bridges, ribs, spine with vertebral arch, and a **heart cavity** holding the inserts. Heart holds **13
 hex-packed ø19.9 mm circular inserts** (insert size *derived* from the recon pixel so an eroded core ≥ 225 mm²),
 or **8×2 solid sectors** (held-out shape), or a single centred insert (integrated-HU size series).
-Dual-kVp EICT (`:dd_fast`) → Cong water/iodine basis → FBP → VMI at 40 & 70 keV."""
+Dual-kVp EICT (`:dd_fast`) → Cong water/iodine basis → FBP → VMI at 70 & 150 keV (`WLP_PAIR`)."""
 
 # ╔═╡ aaaa0010-0000-4000-8000-000000000010
 begin
@@ -266,14 +267,15 @@ end
 # ╔═╡ aaaa0013-0000-4000-8000-000000000013
 md"""## 6 · Run sims + calibrate + decode (cached)
 4 calibration + 1 map thorax; **5 circular-test + 4 sector-test** held-out (n = 65 + 64 = 129 ROIs); 4 centred
-integrated-HU sims. First run ≈ 20 min on GPU; results cache to `wlp_*_cache_v2.jls`. Delete those to re-sim."""
+integrated-HU sims. First run ≈ 20 min on GPU; results cache to `wlp_*_cache_70_150.jls`. Delete those to re-sim."""
 
 # ╔═╡ aaaa0014-0000-4000-8000-000000000014
 begin
-    const CACHE  = joinpath(@__DIR__, "wlp_sim_cache_v2.jls")     # calibration + delivered-map thorax
-    const TCACHE = joinpath(@__DIR__, "wlp_test_cache_v2.jls")    # circular held-out test (5 sims)
-    const ICACHE = joinpath(@__DIR__, "wlp_int_cache_v2.jls")
-    const SCACHE = joinpath(@__DIR__, "wlp_sect_cache_v2.jls")
+    const PTAG   = "$(Int(E40))_$(Int(E70))"                       # pair-derived cache tag (each keV pair its own cache)
+    const CACHE  = joinpath(@__DIR__, "wlp_sim_cache_$(PTAG).jls") # calibration + delivered-map thorax
+    const TCACHE = joinpath(@__DIR__, "wlp_test_cache_$(PTAG).jls")# circular held-out test (5 sims)
+    const ICACHE = joinpath(@__DIR__, "wlp_int_cache_$(PTAG).jls")
+    const SCACHE = joinpath(@__DIR__, "wlp_sect_cache_$(PTAG).jls")
     const CORE_RPX = round(Int, INS_R/RECON_PX_MM - EROSION_PX)   # eroded interior core ≈ 225 mm²
     const IFL = 0.85
     # one packed-thorax acquisition → NHEART eroded insert cores (shared by calibration + circular test)
@@ -403,6 +405,11 @@ begin
         bi=findfirst(==(FIXED_MARGIN_PX),margins)
         push!(integ,(r=r_mm,fl=IFL,truelip=truelip,bg=bg0,naivelip=recov[1],intlip=recov[bi],margins=collect(margins),recov=recov))
     end
+    @printf("PAIR %g/%g keV | cal n=%d R²(f_w)=%.3f ρ=%.3f | TEST n=%d: f_w CCC=%.3f f_l CCC=%.3f f_p CCC=%.3f | cond(G)=%.1f | integrated %.0f–%.0f%% vs naive %.0f–%.0f%%\n",
+        E40,E70,length(calrois),r2fit(cw,fwc),ρ,length(allrois),mw.ccc,ml.ccc,mp.ccc,
+        cond([PL[1]-PW[1] PP[1]-PW[1]; PL[2]-PW[2] PP[2]-PW[2]]),
+        100*minimum(r.intlip/r.truelip for r in integ),100*maximum(r.intlip/r.truelip for r in integ),
+        100*minimum(r.naivelip/r.truelip for r in integ),100*maximum(r.naivelip/r.truelip for r in integ))
     Markdown.parse("cal n=$(length(calrois)), R²(f_w)=$(round(r2fit(cw,fwc),digits=3)); **TEST n=$(length(allrois))** ($(count(==(:circular),geomtag)) circular + $(count(==(:sector),geomtag)) sector) — f_w CCC=**$(round(mw.ccc,digits=3))**, f_l CCC=**$(round(ml.ccc,digits=3))**, f_p CCC=**$(round(mp.ccc,digits=3))**; ρ=$(round(ρ,digits=2)); integrated-HU recovers $(round(Int,100*minimum(r.intlip/r.truelip for r in integ)))–$(round(Int,100*maximum(r.intlip/r.truelip for r in integ)))% vs naive $(round(Int,100*minimum(r.naivelip/r.truelip for r in integ)))–$(round(Int,100*maximum(r.naivelip/r.truelip for r in integ)))%.")
 end
 
@@ -411,7 +418,7 @@ md"## 7 · Figures"
 
 # ╔═╡ aaaa0016-0000-4000-8000-000000000016
 let f=CM.Figure(size=(600,560)), flcol=[r.fl for r in calrois]
-    ax=CM.Axis(f[1,1];xlabel="HU$(Int(E40))",ylabel="HU$(Int(E70))",title="Barycentric triangle · 40 vs 70 keV",aspect=CM.DataAspect())
+    ax=CM.Axis(f[1,1];xlabel="HU$(Int(E40))",ylabel="HU$(Int(E70))",title="Barycentric triangle · $(Int(E40)) vs $(Int(E70)) keV",aspect=CM.DataAspect())
     CM.poly!(ax,[CM.Point2f(PW...),CM.Point2f(PL...),CM.Point2f(PP...)];color=(:steelblue,0.15),strokecolor=:gray,strokewidth=1)
     sc=CM.scatter!(ax,m40c,m70c;color=flcol,colormap=:viridis,markersize=9)
     for (p,t) in ((PW,"W"),(PL,"L"),(PP,"P")); CM.scatter!(ax,[p[1]],[p[2]];marker=:diamond,color=:black,markersize=13); CM.text!(ax,p[1],p[2];text=t,fontsize=16,align=(:center,:bottom)); end
@@ -434,7 +441,7 @@ end
 
 # ╔═╡ aaaa0018-0000-4000-8000-000000000018
 let f=CM.Figure(size=(1520,430))
-    ax=CM.Axis(f[1,1];title="VMI 70 keV",aspect=CM.DataAspect(),yreversed=true); CM.hidedecorations!(ax); CM.heatmap!(ax,map70;colormap=:grays,colorrange=(-200,300))
+    ax=CM.Axis(f[1,1];title="VMI $(Int(E70)) keV",aspect=CM.DataAspect(),yreversed=true); CM.hidedecorations!(ax); CM.heatmap!(ax,map70;colormap=:grays,colorrange=(-200,300))
     for (col,(img,ttl)) in enumerate(((recmap[:,:,1],"f_w"),(recmap[:,:,2],"f_l"),(recmap[:,:,3],"f_p")))
         ax2=CM.Axis(f[1,col+1];title=ttl,aspect=CM.DataAspect(),yreversed=true); CM.hidedecorations!(ax2); CM.heatmap!(ax2,img;colormap=:jet,colorrange=(0,1))
     end
@@ -483,7 +490,7 @@ end
 
 # ╔═╡ aaaa0022-0000-4000-8000-000000000022
 let f=CM.Figure(size=(1520,430))
-    ax=CM.Axis(f[1,1];title="VMI 70 keV (sector)",aspect=CM.DataAspect(),yreversed=true); CM.hidedecorations!(ax); CM.heatmap!(ax,smap70;colormap=:grays,colorrange=(-200,300))
+    ax=CM.Axis(f[1,1];title="VMI $(Int(E70)) keV (sector)",aspect=CM.DataAspect(),yreversed=true); CM.hidedecorations!(ax); CM.heatmap!(ax,smap70;colormap=:grays,colorrange=(-200,300))
     for (col,(img,ttl)) in enumerate(((sect.rec[:,:,1],"f_w"),(sect.rec[:,:,2],"f_l"),(sect.rec[:,:,3],"f_p")))
         ax2=CM.Axis(f[1,col+1];title=ttl,aspect=CM.DataAspect(),yreversed=true); CM.hidedecorations!(ax2); CM.heatmap!(ax2,img;colormap=:jet,colorrange=(0,1))
     end
@@ -543,7 +550,7 @@ Markdown.parse("""
 | f_lipid | $(round(ml.ccc,digits=3)) | $(round(ml.slope,digits=2)) | $(round(ml.rmse,digits=3)) |
 | f_protein | $(round(mp.ccc,digits=3)) | $(round(mp.slope,digits=2)) | $(round(mp.rmse,digits=3)) |
 
-Held-out **circular + sector** (n=$(length(allrois))). Detectability: **$(round(Int,100mean(dHU70.<5)))% of ROIs < 5 HU at 70 keV** (mean $(round(mean(dHU70),digits=1)) HU).
+Held-out **circular + sector** (n=$(length(allrois))). Detectability: **$(round(Int,100mean(dHU70.<5)))% of ROIs < 5 HU at $(Int(E70)) keV** (mean $(round(mean(dHU70),digits=1)) HU).
 
 **Point accuracy** is excellent on the eroded interior cores (all CCC ≈ 0.99) and, as expected on a uniform
 phantom, per-voxel vs pool-then-decode barely differ there. The honesty cost of the ground-truth boundary shows
