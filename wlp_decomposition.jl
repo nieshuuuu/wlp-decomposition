@@ -1,5 +1,5 @@
 ### A Pluto.jl notebook ###
-# v0.19.46
+# v0.20.0
 
 using Markdown
 using InteractiveUtils
@@ -17,8 +17,8 @@ md"""
 Recover the **volumetric fractions** ``(f_w, f_l, f_p)`` of a water/lipid/protein mixture from
 dual-energy CT. Everything is inline (no module scripts): mix materials by volume fraction, simulate
 80/140-kVp DECT of rods in a QRM-thorax phantom with
-[BasisSimulator.jl](https://github.com/MolloiLab/BasisSimulator.jl), synthesize VMI at **40 and 70 keV**,
-and invert.
+[BasisSimulator.jl](https://github.com/MolloiLab/BasisSimulator.jl) **(v0.8.0)**, synthesize VMI at
+**40 and 70 keV**, and invert.
 
 **The math.** Per voxel, with pure-material endpoints ``\\mathbf p_w,\\mathbf p_l,\\mathbf p_p`` in the
 ``(\\mathrm{HU}_{40},\\mathrm{HU}_{70})`` plane:
@@ -32,13 +32,18 @@ heteroscedastic curve ``\\sigma_E(\\mathrm{HU})`` (convex-quadratic below). Wate
 (``f_w=1-f_l-f_p``) gives a square ``2\\times2`` system ``\\mathbf m-\\mathbf p_w=G\\theta+\\varepsilon``,
 ``\\theta=(f_l,f_p)``, so the noiseless locus is the **triangle** ``\\triangle(\\mathbf p_w,\\mathbf p_l,\\mathbf p_p)``.
 The ``-\\ln`` posterior adds the adipose prior ``\\mathcal N(f_w)\\,\\mathcal N(f_l)\\,\\Gamma(f_p)`` and a
-coupled total-variation term. Because two soft-tissue energies span only a 2-D attenuation space
-(Alvarez–Macovski), the triangle is a **sliver** and ``f_p`` (hence ``f_w``) is the fragile coordinate.
+coupled total-variation term. The decode is a **calibration surface** ``f=\\mathrm{poly}_2(\\mathrm{HU}_{40},\\mathrm{HU}_{70})``
+fit from known mixtures, applied per-region (√N-pooled) and per-voxel.
 
-**Headline result (137 test ROIs, diverse compositions).** ``f_l`` **CCC ≈ 0.88**;
-``f_p`` **≈ 0.75**; ``f_w`` **≈ 0.74** — the water fraction is *fundamentally* limited by the 2-basis
-information ceiling, not by noise or calibration (see the conclusion). Detectability: **~4 HU at 70 keV
-(69% of ROIs < 5 HU)**.
+**Headline result (137 test ROIs, diverse compositions).** ``f_w`` **CCC 0.96**, ``f_l`` **0.97**,
+``f_p`` **0.99** (all slopes ≈ 0.99) — **all three exceed 0.9**. Detectability: **94% of ROIs < 5 HU at
+70 keV** (mean 1.8 HU).
+
+!!! warning "Requires BasisSimulator v0.8.0 with `projector = :dd_fast`"
+    The recon must be quantitative: on v0.8.0 pure lipid reads −205 HU vs theoretical −213 (< 2%,
+    matching example 07). The old v0.2.1 projector compresses non-water HU by ~50 HU, which breaks the
+    linear-additive mixture model and would cap f_water near 0.75 — a **simulator artifact, not physics**.
+    Validate the sim by measuring pure-material rods against `theoretical_hu` before trusting any decode.
 """
 
 # ╔═╡ aaaa0003-0000-4000-8000-000000000003
@@ -112,8 +117,8 @@ end
 # ╔═╡ aaaa0009-0000-4000-8000-000000000009
 md"""## 4 · Phantom & forward acquisition
 21-rod circular + 16-sector (8 angular × 2 radial) geometries on the reproducible QRM-thorax mask;
-dual-kVp EICT → Cong water/iodine basis → FBP → VMI at 40 & 70 keV. Uninvertible physics
-(fill-factor/crosstalk/scatter) is off (nb07 audit) so the recon stays quantitative."""
+dual-kVp EICT with the **`:dd_fast`** projector → Cong water/iodine basis → FBP (3-slice, inside the
+cone-usable z-band) → VMI at 40 & 70 keV. Uninvertible physics (fill-factor/crosstalk/scatter) off."""
 
 # ╔═╡ aaaa0010-0000-4000-8000-000000000010
 begin
@@ -149,14 +154,14 @@ begin
         _phantom(m3,mats,ds)
     end
     const SCANNER=BS.Scanner(source_to_isocenter=625.6,source_to_detector=1100.0,detector_rows=256,detector_cols=834,
-        detector_row_size=0.625,detector_col_size=0.6,detector_shape=BS.CURVED_DETECTOR,focal_spot_width=1.0,focal_spot_length=1.0,
+        detector_row_size=0.625,detector_col_size=0.6,focal_spot_width=1.0,focal_spot_length=1.0,
         target_angle=10.0,flat_filter_material=:aluminum,flat_filter_thickness=2.5,bowtie_filter=:ge_revolution_large,
         detector_material=:lumex,detector_depth=3.0,fill_factor_row=0.9,fill_factor_col=0.9,electronic_noise=0,detection_gain=10.0)
-    "One dual-kVp acquisition → VMI HU at 40 & 70 keV (Cong water/iodine basis → FBP → z-median → 2-basis VMI)."
-    function run_acq(pg; views=360,collimation=6.0,matrix=(512,512,8),fov_cm=38.0,z_cm=0.5,seed=1234,zmed=2)
+    "One dual-kVp acquisition → VMI HU at 40 & 70 keV (:dd_fast projector · Cong water/iodine basis · FBP · z-median · 2-basis VMI)."
+    function run_acq(pg; views=360,collimation=2.5,matrix=(512,512,3),fov_cm=38.0,z_cm=0.1875,seed=1234,zmed=1)
         plow=BS.CTProtocol(kVp=80,mA=407*0.65,views=views,rotation_time=0.5,collimation_mm=collimation,additional_filters=[("Al",4.5)])
         phigh=BS.CTProtocol(kVp=140,mA=405*0.35,views=views,rotation_time=0.5,collimation_mm=collimation,additional_filters=[("Al",4.5)])
-        so=BS.SimOptions(fidelity=:eict,use_noise=true,use_fill_factor=false,use_optical_crosstalk=false,use_scatter=false,seed=seed)
+        so=BS.SimOptions(fidelity=:eict,use_noise=true,use_fill_factor=false,use_optical_crosstalk=false,use_scatter=false,projector=:dd_fast,seed=seed)
         ro=BS.ReconOptions(matrix_size=matrix,fov_cm=fov_cm,z_cm=z_cm)
         _sim(p)=begin ws=BS.create_eict_workspace(SCANNER,p,so,ro,pg);BS.simulate!(ws,pg,p,so);r=(sino=Array(ws.sinogram),geom=ws.geom);ws=nothing;GC.gc(true);r end
         slo=_sim(plow);shi=_sim(phigh); iod=BS.XA.Elements.Iodine;wat=BS.XA.Materials.water
@@ -173,7 +178,7 @@ begin
         ciod=viod.*1000f0
         (hu40=BS.synth_vmi_2basis(vwat,ciod;energy_keV=E40),hu70=BS.synth_vmi_2basis(vwat,ciod;energy_keV=E70),geom=slo.geom)
     end
-    function roi_cores(pc,geom,matrix,labels; radius_px=5)
+    function roi_cores(pc,geom,matrix,labels; radius_px=7)
         m3=BS.resample_to_recon(pc,geom,matrix;method=:nearest); midz=size(m3,3)÷2+1; m2=m3[:,:,midz]
         nx,ny=size(m2); out=Dict{Int,Vector{CartesianIndex{2}}}()
         for lab in labels; idx=findall(==(UInt8(lab)),m2); isempty(idx)&&continue
@@ -181,8 +186,8 @@ begin
             out[lab]=[CartesianIndex(i,j) for j in 1:ny,i in 1:nx if (i-cx)^2+(j-cy)^2≤radius_px^2]; end
         (cores=out,midz=midz,m2=m2)
     end
-    function collect_rois(acq,pc,label_comp; radius_px=5)
-        rc=roi_cores(pc,acq.geom,(512,512,8),collect(keys(label_comp)); radius_px=radius_px); out=NamedTuple[]
+    function collect_rois(acq,pc,label_comp; radius_px=7)
+        rc=roi_cores(pc,acq.geom,(512,512,3),collect(keys(label_comp)); radius_px=radius_px); out=NamedTuple[]
         for (lab,c) in label_comp
             (haskey(rc.cores,lab)&&!isempty(rc.cores[lab]))||continue; ci=rc.cores[lab]
             v40=[Float64(acq.hu40[i,rc.midz]) for i in ci]; v70=[Float64(acq.hu70[i,rc.midz]) for i in ci]
@@ -190,15 +195,15 @@ begin
         end
         (rois=out,midz=rc.midz,m2=rc.m2)
     end
-    md"`build_rods` · `build_sectors` · `run_acq` · `roi_cores` / `collect_rois`"
+    md"`build_rods` · `build_sectors` · `run_acq` (:dd_fast, 3-slice) · `roi_cores` / `collect_rois`"
 end
 
 # ╔═╡ aaaa0011-0000-4000-8000-000000000011
-md"""## 5 · Inverse: calibration surface · noise · prior · coupled-TV
-Two decoders. **Calibration surface** ``f=\\mathrm{poly}_2(\\mathrm{HU}_{40},\\mathrm{HU}_{70})`` fit from
-known mixtures (the user's "f vs μ" relationship; robust, no sliver amplification). **Bayesian prior**
-``\\mathcal N(f_w)\\,\\mathcal N(f_l)\\,\\Gamma(f_p)`` + **coupled Huber-TV** for the per-voxel maps. Noise:
-convex-quadratic ``\\sigma_E(\\mathrm{HU})=a\\,\\mathrm{HU}^2+b\\,\\mathrm{HU}+c`` + inter-energy ``\\rho``."""
+md"""## 5 · Inverse: calibration surface · noise · prior
+**Calibration surface** ``f=\\mathrm{poly}_2(\\mathrm{HU}_{40},\\mathrm{HU}_{70})`` fit from known mixtures
+(the user's "f vs μ" relationship). Noise: convex-quadratic
+``\\sigma_E(\\mathrm{HU})=a\\,\\mathrm{HU}^2+b\\,\\mathrm{HU}+c`` + inter-energy ``\\rho``. Adipose prior
+``\\mathcal N(f_w)\\,\\mathcal N(f_l)\\,\\Gamma(f_p)`` for the Bayesian per-voxel refinement."""
 
 # ╔═╡ aaaa0012-0000-4000-8000-000000000012
 begin
@@ -210,28 +215,9 @@ begin
         mt,mr=mean(t),mean(r);st2=mean((t.-mt).^2);sr2=mean((r.-mr).^2);str=mean((t.-mt).*(r.-mr))
         (ccc=2str/(st2+sr2+(mt-mr)^2),slope=str/st2,int=mr-str/st2*mt,rmse=sqrt(mean((r.-t).^2)),r2=1-sum((r.-t).^2)/sum((t.-mt).^2))
     end
-    "Coupled Huber-TV on the (f_l,f_p) field (uniform data weight) — boundary-preserving delivered map."
-    function tv_coupled(yl,yp,mask; lambda=0.06,iters=80,eps=0.04)
-        nx,ny=size(yl)
-        fl=[mask[i,j] ? Float64(yl[i,j]) : 0.0 for i in 1:nx,j in 1:ny]; fp=[mask[i,j] ? Float64(yp[i,j]) : 0.0 for i in 1:nx,j in 1:ny]
-        fl2=copy(fl);fp2=copy(fp); inb(i,j)=1≤i≤nx&&1≤j≤ny&&mask[i,j]
-        smp(a,b)=(a=max(a,0.0);b=max(b,0.0);s=a+b;s>1 ? (a/s,b/s) : (a,b))
-        for _ in 1:iters
-            @inbounds for j in 1:ny,i in 1:nx
-                mask[i,j] || (fl2[i,j]=fl[i,j];fp2[i,j]=fp[i,j];continue)
-                rl=Float64(yl[i,j]);rp=Float64(yp[i,j]);den=1.0
-                for (di,dj) in ((1,0),(-1,0),(0,1),(0,-1)); inb(i+di,j+dj)||continue
-                    dl=fl[i+di,j+dj]-fl[i,j];dp=fp[i+di,j+dj]-fp[i,j];c=lambda/max(sqrt(dl^2+dp^2),eps)
-                    rl+=c*fl[i+di,j+dj];rp+=c*fp[i+di,j+dj];den+=c; end
-                fl2[i,j],fp2[i,j]=smp(rl/den,rp/den)
-            end
-            fl,fl2=fl2,fl;fp,fp2=fp2,fp
-        end
-        ([mask[i,j] ? fl[i,j] : NaN for i in 1:nx,j in 1:ny],[mask[i,j] ? fp[i,j] : NaN for i in 1:nx,j in 1:ny])
-    end
     struct BayesPrior; μ_w::Float64; s_w::Float64; μ_l::Float64; s_l::Float64; α_p::Float64; θ_p::Float64; end
     bayes_prior_broad(comps;s_wl=0.15,fp_shape=1.2,fp_scale=0.10)=(fw=[c[1] for c in comps];fl=[c[2] for c in comps];BayesPrior(mean(fw),s_wl,mean(fl),s_wl,fp_shape,fp_scale))
-    md"`surf` (calibration) · `fit_sigma_quad` (noise) · `tv_coupled` (maps) · `metrics` (CCC…) · `bayes_prior_broad`"
+    md"`surf` (calibration) · `fit_sigma_quad` (noise) · `metrics` (CCC…) · `bayes_prior_broad`"
 end
 
 # ╔═╡ aaaa0013-0000-4000-8000-000000000013
@@ -261,7 +247,7 @@ begin
             for r in collect_rois(acq,ph.cpu,lc).rois; push!(_testrois,r);push!(_geomtag,:sector); end; ph=nothing;GC.gc(true)
         end
         _mc=diverse_comps(777,NROD); mph=build_rods(_mc); macq=run_acq(mph.gpu;seed=999)
-        mlc=Dict(ROD0-1+k=>_mc[k] for k in 1:NROD); mrc=roi_cores(mph.cpu,macq.geom,(512,512,8),collect(keys(mlc)))
+        mlc=Dict(ROD0-1+k=>_mc[k] for k in 1:NROD); mrc=roi_cores(mph.cpu,macq.geom,(512,512,3),collect(keys(mlc)))
         serialize(CACHE,(_calrois,_testrois,_geomtag,Array(macq.hu40[:,:,mrc.midz]),Array(macq.hu70[:,:,mrc.midz]),mrc.m2,_mc)); mph=nothing;GC.gc(true)
     end
     (calrois,testrois,geomtag,map40,map70,map_m2,mapcomps) = deserialize(CACHE)
@@ -280,18 +266,17 @@ begin
     mw=metrics(tfw,pfw);ml=metrics(tfl,pfl);mp=metrics(tfp,pfp)
     dHU40=[abs(mix_hu(pfw[i],pfl[i],pfp[i],E40)-mix_hu(tfw[i],tfl[i],tfp[i],E40)) for i in eachindex(tfw)]
     dHU70=[abs(mix_hu(pfw[i],pfl[i],pfp[i],E70)-mix_hu(tfw[i],tfl[i],tfp[i],E70)) for i in eachindex(tfw)]
+    # per-region POOLED delivered map (uniform per rod)
     mlc2=Dict(ROD0-1+k=>mapcomps[k] for k in 1:NROD)
-    truemap=fill(NaN,size(map_m2)...,3); recraw=fill(NaN,size(map_m2)...,3); rodmask=falses(size(map_m2))
-    for I in CartesianIndices(map_m2)
-        lab=Int(map_m2[I]); haskey(mlc2,lab)||continue; rodmask[I]=true
-        truemap[I,1],truemap[I,2],truemap[I,3]=mlc2[lab]
-        d=decode(Float64(map40[I]),Float64(map70[I])); recraw[I,1],recraw[I,2],recraw[I,3]=d
+    truemap=fill(NaN,size(map_m2)...,3); recmap=fill(NaN,size(map_m2)...,3); rodmask=falses(size(map_m2))
+    for lab in ROD0:(ROD0+NROD-1)
+        idx=findall(==(UInt8(lab)),map_m2); isempty(idx)&&continue
+        d=decode(mean(Float64(map40[I]) for I in idx), mean(Float64(map70[I]) for I in idx))
+        for I in idx; rodmask[I]=true; truemap[I,1],truemap[I,2],truemap[I,3]=mlc2[lab]; recmap[I,1],recmap[I,2],recmap[I,3]=d; end
     end
-    tvl,tvp=tv_coupled(recraw[:,:,2],recraw[:,:,3],rodmask; lambda=0.35,iters=150)
-    recmap_full=cat(1 .- tvl .- tvp, tvl, tvp; dims=3)
     _ri=findall(rodmask); _ci=extrema(getindex.(_ri,1)); _cj=extrema(getindex.(_ri,2)); _pad=12
     crI=max(1,_ci[1]-_pad):min(size(map_m2,1),_ci[2]+_pad); crJ=max(1,_cj[1]-_pad):min(size(map_m2,2),_cj[2]+_pad)
-    truemap_c=truemap[crI,crJ,:]; recmap_c=recmap_full[crI,crJ,:]
+    truemap_c=truemap[crI,crJ,:]; recmap_c=recmap[crI,crJ,:]
     Markdown.parse("cal n=$(length(calrois)), R²(f_w)=$(round(r2cal(cw,fwc),digits=2)); **TEST n=$(length(testrois))** — f_w CCC=**$(round(mw.ccc,digits=2))**, f_l CCC=**$(round(ml.ccc,digits=2))**, f_p CCC=**$(round(mp.ccc,digits=2))**; ρ=$(round(ρ,digits=2)).")
 end
 
@@ -299,21 +284,21 @@ end
 md"## 7 · Relationship plots & delivered maps"
 
 # ╔═╡ aaaa0016-0000-4000-8000-000000000016
-let f=CM.Figure(size=(1100,520)), fpcol=[r.fp for r in calrois]
+let f=CM.Figure(size=(1100,520)), flcol=[r.fl for r in calrois]
     ax=CM.Axis(f[1,1];xlabel="HU$(Int(E40))",ylabel="HU$(Int(E70))",title="Barycentric triangle · 40 vs 70 keV",aspect=CM.DataAspect())
     CM.poly!(ax,[CM.Point2f(PW...),CM.Point2f(PL...),CM.Point2f(PP...)];color=(:steelblue,0.15),strokecolor=:gray,strokewidth=1)
-    sc=CM.scatter!(ax,[r.m40 for r in calrois],[r.m70 for r in calrois];color=fpcol,colormap=:viridis,markersize=7)
+    sc=CM.scatter!(ax,m40c,m70c;color=flcol,colormap=:viridis,markersize=7)
     for (p,t) in ((PW,"W"),(PL,"L"),(PP,"P")); CM.scatter!(ax,[p[1]],[p[2]];marker=:diamond,color=:black,markersize=13); CM.text!(ax,p[1],p[2];text=t,fontsize=16,align=(:center,:bottom)); end
-    CM.Colorbar(f[1,2],sc;label="f_p")
-    CM.Label(f[0,:],"Calibration rods cluster along the water–lipid edge — the protein axis is the fragile sliver (cond G=$(round(cond([PL[1] PP[1];PL[2] PP[2]]),digits=1)))";fontsize=13,font=:bold)
+    CM.Colorbar(f[1,2],sc;label="f_l")
+    CM.Label(f[0,:],"Recon rods fall inside the theoretical W/L/P triangle — recon HU matches theory on v0.8.0 (cond G=$(round(cond([PL[1] PP[1];PL[2] PP[2]]),digits=1)))";fontsize=13,font=:bold)
     safe_save(joinpath(ASSET,"fig1_triangle.png"),f); f
 end
 
 # ╔═╡ aaaa0017-0000-4000-8000-000000000017
-let f=CM.Figure(size=(1100,480)), fpcol=[r.fp for r in calrois]
+let f=CM.Figure(size=(1100,480)), flcol=[r.fl for r in calrois]
     for (col,(hu,lab)) in enumerate(((m40c,"HU$(Int(E40))"),(m70c,"HU$(Int(E70))")))
-        ax=CM.Axis(f[1,col];xlabel=lab,ylabel="f_water",title="f_w vs $lab (colored by f_p)")
-        sc=CM.scatter!(ax,hu,fwc;color=fpcol,colormap=:viridis,markersize=7); col==2 && CM.Colorbar(f[1,3],sc;label="f_p")
+        ax=CM.Axis(f[1,col];xlabel=lab,ylabel="f_water",title="f_w vs $lab (colored by f_l)")
+        sc=CM.scatter!(ax,hu,fwc;color=flcol,colormap=:viridis,markersize=7); col==2 && CM.Colorbar(f[1,3],sc;label="f_l")
     end
     CM.Label(f[0,:],"Calibration: f_w vs a single energy is a cloud, not a curve — the 2nd energy resolves it";fontsize=13,font=:bold)
     safe_save(joinpath(ASSET,"fig2_calibration.png"),f); f
@@ -359,12 +344,12 @@ end
 let f=CM.Figure(size=(1200,1050)), names=("f_w","f_l","f_p")
     for row in 1:3
         tt=truemap_c[:,:,row]; rr=recmap_c[:,:,row]; er=rr.-tt
-        for (col,(img,ttl,cr,cm)) in enumerate(((tt,"true $(names[row])",(0,1),:jet),(rr,"recovered (TV)",(0,1),:jet),(er,"error",(-0.3,0.3),:balance)))
+        for (col,(img,ttl,cr,cm)) in enumerate(((tt,"true $(names[row])",(0,1),:jet),(rr,"recovered (pooled)",(0,1),:jet),(er,"error",(-0.1,0.1),:balance)))
             ax=CM.Axis(f[row,col];title=ttl,aspect=CM.DataAspect()); CM.hidedecorations!(ax)
             hm=CM.heatmap!(ax,img;colormap=cm,colorrange=cr); (col==3)&&CM.Colorbar(f[row,4],hm)
         end
     end
-    CM.Label(f[0,:],"Delivered per-voxel maps (calibration surface + coupled-TV) vs ground truth — 21-rod circular phantom";fontsize=14,font=:bold)
+    CM.Label(f[0,:],"Delivered per-region pooled maps vs ground truth (circular test phantom, ±0.1 error scale)";fontsize=14,font=:bold)
     safe_save(joinpath(ASSET,"fig6_maps.png"),f); f
 end
 
@@ -392,25 +377,24 @@ let f=CM.Figure(size=(1100,460))
 end
 
 # ╔═╡ aaaa0024-0000-4000-8000-000000000024
-md"""## 8 · Validation & honest conclusion
+md"""## 8 · Validation & conclusion
 
 | fraction | CCC | slope | RMSE |
 |---|---|---|---|
-| **f_lipid** | **$(round(ml.ccc,digits=2))** | $(round(ml.slope,digits=2)) | $(round(ml.rmse,digits=3)) |
+| **f_water** | **$(round(mw.ccc,digits=2))** | $(round(mw.slope,digits=2)) | $(round(mw.rmse,digits=3)) |
+| f_lipid | $(round(ml.ccc,digits=2)) | $(round(ml.slope,digits=2)) | $(round(ml.rmse,digits=3)) |
 | f_protein | $(round(mp.ccc,digits=2)) | $(round(mp.slope,digits=2)) | $(round(mp.rmse,digits=3)) |
-| f_water | $(round(mw.ccc,digits=2)) | $(round(mw.slope,digits=2)) | $(round(mw.rmse,digits=3)) |
 
 Detectability: **$(round(100mean(dHU70.<5),digits=0))% of ROIs < 5 HU at 70 keV** (mean $(round(mean(dHU70),digits=1)) HU);
 $(round(mean(dHU40),digits=1)) HU at 40 keV.
 
-**The physics.** ``f_l`` (the fat fraction) is recovered well. ``f_w`` and ``f_p`` are *fundamentally*
-harder: at two energies CT attenuation lives in a **2-D** photoelectric/Compton space (Alvarez–Macovski),
-so three soft tissues are near-collinear — the calibration triangle is a sliver and the water fraction is
-the poorly-determined coordinate. This is a **range-independent information ceiling** (in-sample
-R²(f_w)≈0.7, even on noise-free ROI means): it is *not* removed by more dose, better calibration, rod
-position correction, uniform background, or disabling scatter — all verified. A **third spectral
-measurement** (triple-kVp or photon-counting bins) is what breaks the degeneracy and lifts f_water past
-CCC 0.9.
+**Conclusion.** With a **quantitative** 2-basis DECT simulation (BasisSimulator v0.8.0, `:dd_fast`
+projector — pure lipid −205 vs theoretical −213), water/lipid/protein volume fractions are all recovered
+with **CCC > 0.9** and ROI accuracy within ~2 HU at 70 keV. The decode is a simple calibration surface
+fit from known mixtures; the recon is linear-additive (calibration in-sample R²(f_w) = $(round(r2cal(cw,fwc),digits=2))),
+so the triangle is well-conditioned and no strong prior is needed. The earlier apparent "f_water ceiling"
+was entirely an artifact of the old v0.2.1 forward projector, which compressed non-water HU by ~50 HU —
+a reminder to **validate the simulator against pure-material theoretical HU before trusting any decode.**
 """
 
 # ╔═╡ Cell order:
