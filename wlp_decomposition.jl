@@ -1,5 +1,5 @@
 ### A Pluto.jl notebook ###
-# v0.20.0
+# v0.1.0
 
 using Markdown
 using InteractiveUtils
@@ -8,6 +8,19 @@ using InteractiveUtils
 begin
     import Pkg
     Pkg.activate(@__DIR__)
+end
+
+# ╔═╡ aaaa0004-0000-4000-8000-000000000004
+begin
+    import BasisSimulator as BS
+    import Metal
+    import CairoMakie as CM
+    using Unitful, LinearAlgebra, Statistics, Random, DelimitedFiles, Printf, Serialization
+    to_gpu(x) = Metal.functional() ? Metal.MtlArray(x) : x
+    const DATA = joinpath(@__DIR__, "data")
+    const ASSET = joinpath(@__DIR__, "assets")
+    safe_save(p, f) = CM.save(p, f; px_per_unit = 1.4)   # figures ≤1300 wide ⇒ ≤1820 px/side
+    md"imports · GPU backend (Metal, CPU fallback) · `safe_save` (≤1920 px/side)"
 end
 
 # ╔═╡ aaaa0002-0000-4000-8000-000000000002
@@ -48,19 +61,6 @@ fit from known mixtures, applied per-region (√N-pooled) and per-voxel.
 
 # ╔═╡ aaaa0003-0000-4000-8000-000000000003
 md"## 1 · Setup"
-
-# ╔═╡ aaaa0004-0000-4000-8000-000000000004
-begin
-    import BasisSimulator as BS
-    import Metal
-    import CairoMakie as CM
-    using Unitful, LinearAlgebra, Statistics, Random, DelimitedFiles, Printf, Serialization
-    to_gpu(x) = Metal.functional() ? Metal.MtlArray(x) : x
-    const DATA = joinpath(@__DIR__, "data")
-    const ASSET = joinpath(@__DIR__, "assets")
-    safe_save(p, f) = CM.save(p, f; px_per_unit = 1.4)   # figures ≤1300 wide ⇒ ≤1820 px/side
-    md"imports · GPU backend (Metal, CPU fallback) · `safe_save` (≤1920 px/side)"
-end
 
 # ╔═╡ aaaa0005-0000-4000-8000-000000000005
 md"## 2 · Materials & theoretical endpoints"
