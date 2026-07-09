@@ -28,8 +28,8 @@ md"""
 # Water–Lipid–Protein Material Decomposition — a pure-physics study
 
 Recover the **volumetric fractions** ``(f_w, f_l, f_p)`` of a water/lipid/protein mixture from
-dual-energy CT. Everything is inline (no module scripts): mix materials by volume fraction, simulate
-80/140-kVp DECT of rods in a QRM-thorax phantom with
+dual-energy CT. Everything is inline (no module scripts; the phantom is generated in code — the only data
+file is the Woodard adipose CSV for the prior): mix materials by volume fraction, simulate 80/140-kVp DECT with
 [BasisSimulator.jl](https://github.com/MolloiLab/BasisSimulator.jl) **(v0.8.0)**, synthesize VMI at
 **40 and 70 keV**, and invert.
 
@@ -44,19 +44,19 @@ The per-material noise terms collapse to one ``\\varepsilon_E`` per energy read 
 heteroscedastic curve ``\\sigma_E(\\mathrm{HU})`` (convex-quadratic below). Water-referencing
 (``f_w=1-f_l-f_p``) gives a square ``2\\times2`` system ``\\mathbf m-\\mathbf p_w=G\\theta+\\varepsilon``,
 ``\\theta=(f_l,f_p)``, so the noiseless locus is the **triangle** ``\\triangle(\\mathbf p_w,\\mathbf p_l,\\mathbf p_p)``.
-The ``-\\ln`` posterior adds the adipose prior ``\\mathcal N(f_w)\\,\\mathcal N(f_l)\\,\\Gamma(f_p)`` and a
-coupled total-variation term. The decode is a **calibration surface** ``f=\\mathrm{poly}_2(\\mathrm{HU}_{40},\\mathrm{HU}_{70})``
-fit from known mixtures, applied per-region (√N-pooled) and per-voxel.
+The decode is a **calibration surface** ``f=\\mathrm{poly}_2(\\mathrm{HU}_{40},\\mathrm{HU}_{70})`` fit from
+known mixtures, applied per-region (√N-pooled) and per-voxel; the adipose prior
+``\\mathcal N(f_w)\\,\\mathcal N(f_l)\\,\\Gamma(f_p)`` supports Bayesian per-voxel refinement.
 
-**Headline result (137 test ROIs, diverse compositions).** ``f_w`` **CCC 0.96**, ``f_l`` **0.97**,
-``f_p`` **0.99** (all slopes ≈ 0.99) — **all three exceed 0.9**. Detectability: **94% of ROIs < 5 HU at
-70 keV** (mean 1.8 HU).
+**Headline result (97 test ROIs, ø28 mm rods, diverse compositions).** ``f_w`` **CCC 0.99**,
+``f_l`` **1.00**, ``f_p`` **1.00** (all slopes ≈ 1.0) — all three ≫ 0.9. Detectability: **100% of ROIs
+< 5 HU at 70 keV** (mean 0.8 HU).
 
 !!! warning "Requires BasisSimulator v0.8.0 with `projector = :dd_fast`"
     The recon must be quantitative: on v0.8.0 pure lipid reads −205 HU vs theoretical −213 (< 2%,
-    matching example 07). The old v0.2.1 projector compresses non-water HU by ~50 HU, which breaks the
+    matching example 07). The old v0.2.1 projector compressed non-water HU by ~50 HU, which breaks the
     linear-additive mixture model and would cap f_water near 0.75 — a **simulator artifact, not physics**.
-    Validate the sim by measuring pure-material rods against `theoretical_hu` before trusting any decode.
+    Always validate the sim by measuring pure-material rods against `theoretical_hu` before trusting a decode.
 """
 
 # ╔═╡ aaaa0003-0000-4000-8000-000000000003
@@ -116,42 +116,44 @@ end
 
 # ╔═╡ aaaa0009-0000-4000-8000-000000000009
 md"""## 4 · Phantom & forward acquisition
-21-rod circular + 16-sector (8 angular × 2 radial) geometries on the reproducible QRM-thorax mask;
-dual-kVp EICT with the **`:dd_fast`** projector → Cong water/iodine basis → FBP (3-slice, inside the
-cone-usable z-band) → VMI at 40 & 70 keV. Uninvertible physics (fill-factor/crosstalk/scatter) off."""
+Phantom generated inline (no data file): a Ø280 mm water cylinder with **13 ø28 mm rods** (1 centre + 6 + 6)
+— big enough that an eroded ROI core exceeds 200 mm². 16-sector geometry (8 angular × 2 radial) too.
+Dual-kVp EICT with the **`:dd_fast`** projector → Cong water/iodine basis → FBP (3-slice, inside the
+cone-usable z-band) → VMI at 40 & 70 keV."""
 
 # ╔═╡ aaaa0010-0000-4000-8000-000000000010
 begin
-    const NX, NY, VOX = 1850, 1350, 0.2; const ROD0, NROD = 8, 21
-    load_mask2d() = reshape(Vector{UInt8}(read(joinpath(DATA,"qrm_thorax_wlplat_1850x1350_uint8.raw"))), NX, NY)
-    function _base_mats(uniform)
-        m=Dict{Int,BS.XA.Material}(0=>BS.XA.Materials.air,1=>BS.XA.Materials.lung,2=>BS.XA.Materials.muscle,
-            3=>BS.XA.Materials.corticalbone,4=>BS.XA.Materials.marrow_red,5=>BS.XA.Materials.adipose,6=>BS.XA.Materials.water,7=>BS.XA.Materials.basis_lipid)
-        uniform && (for l in 1:5; m[l]=BS.XA.Materials.water; end); m
+    const ROD0, NROD = 8, 13; const RODMM, VOXMM, BODYMM = 28.0, 0.4, 280.0   # rod ø, voxel, body ø (mm)
+    big_centers()=(cs=NTuple{2,Float64}[]; for (r,k) in zip((0.0,60.0,110.0),(1,6,6)),m in 0:k-1
+            θ=2π*m/k+(r>0 ? π/k : 0.0); push!(cs,(r*cos(θ),r*sin(θ))); end; cs)
+    const BIGC=big_centers(); @assert length(BIGC)==NROD                        # 1 centre + 6 (r60) + 6 (r110)
+    _canvas()=(n=round(Int,BODYMM/VOXMM)+40; (n=n,c=(n+1)/2,rb=BODYMM/2/VOXMM))
+    function _phantom(lbl,mats; nz=40)
+        m3=repeat(reshape(lbl,size(lbl)...,1),1,1,nz); vc=VOXMM/10
+        pc=BS.create_phantom_from_mask(Array{Int,3}(m3),mats,(vc,vc,vc))
+        (cpu=pc,gpu=BS.Phantom(to_gpu(pc.mask),pc.materials,pc.voxel_size,pc.origin,pc.extent))
     end
-    function _phantom(m3, mats, ds)
-        vox=VOX*ds/10; pc=BS.create_phantom_from_mask(Array{Int,3}(m3),mats,(vox,vox,vox))
-        (cpu=pc, gpu=BS.Phantom(to_gpu(pc.mask),pc.materials,pc.voxel_size,pc.origin,pc.extent))
-    end
-    function build_rods(comps; nz=40, ds=2, uniform=true)
-        m2=load_mask2d(); ds>1&&(m2=m2[1:ds:end,1:ds:end]); nx,ny=size(m2); m3=repeat(reshape(m2,nx,ny,1),1,1,nz)
-        mats=_base_mats(uniform); for k in 1:NROD; mats[ROD0-1+k]=wlp_material(comps[k]...;name="rod$k"); end
-        _phantom(m3,mats,ds)
-    end
-    function build_sectors(comps; nz=40, ds=2, uniform=true)   # 16 solid sectors: 8 angular × 2 radial
-        @assert length(comps)==16
-        m2=load_mask2d(); ds>1&&(m2=m2[1:ds:end,1:ds:end]); nx,ny=size(m2)
-        ridx=findall(l->ROD0≤Int(l)≤ROD0+NROD-1, m2); cx=mean(getindex.(ridx,1)); cy=mean(getindex.(ridx,2))
-        R=maximum(sqrt((Float64(i[1])-cx)^2+(Float64(i[2])-cy)^2) for i in ridx)+8.0/(VOX*ds)
-        m3=repeat(reshape(m2,nx,ny,1),1,1,nz)
-        @inbounds for j in 1:ny,i in 1:nx
-            d=sqrt((i-cx)^2+(j-cy)^2); d≤R || continue
-            sec=min(7,floor(Int,mod(atan(j-cy,i-cx),2π)/(2π/8))); ring=d<R/2 ? 0 : 1; lab=UInt8(ROD0+ring*8+sec)
-            for k in 1:nz; m3[i,j,k]=lab; end
+    function build_rods(comps; nz=40)                                          # 13 big circular rods in water
+        @assert length(comps)==NROD; g=_canvas(); n,c,rb=g.n,g.c,g.rb; rr=RODMM/2/VOXMM; lbl=zeros(UInt8,n,n)
+        @inbounds for j in 1:n,i in 1:n
+            (i-c)^2+(j-c)^2 ≤ rb^2 || continue; lab=UInt8(1)
+            for (ri,(cx,cy)) in enumerate(BIGC); px=c+cx/VOXMM; py=c+cy/VOXMM
+                if (i-px)^2+(j-py)^2 ≤ rr^2; lab=UInt8(ROD0-1+ri); break; end; end
+            lbl[i,j]=lab
         end
-        mats=_base_mats(uniform); for l in ROD0:(ROD0+NROD-1); mats[l]=BS.XA.Materials.water; end
+        mats=Dict{Int,BS.XA.Material}(0=>BS.XA.Materials.air,1=>BS.XA.Materials.water)
+        for k in 1:NROD; mats[ROD0-1+k]=wlp_material(comps[k]...;name="rod$k"); end
+        _phantom(lbl,mats;nz=nz)
+    end
+    function build_sectors(comps; sect_r_mm=100.0, nz=40)                       # 16 solid sectors (8 angular × 2 radial)
+        @assert length(comps)==16; g=_canvas(); n,c,rb=g.n,g.c,g.rb; rs=sect_r_mm/VOXMM; lbl=zeros(UInt8,n,n)
+        @inbounds for j in 1:n,i in 1:n
+            d2=(i-c)^2+(j-c)^2; d2≤rb^2 || continue; d=sqrt(d2)
+            lbl[i,j]= d≤rs ? UInt8(ROD0+(d<rs/2 ? 0 : 8)+min(7,floor(Int,mod(atan(j-c,i-c),2π)/(2π/8)))) : UInt8(1)
+        end
+        mats=Dict{Int,BS.XA.Material}(0=>BS.XA.Materials.air,1=>BS.XA.Materials.water)
         for s in 0:15; mats[ROD0+s]=wlp_material(comps[s+1]...;name="sec$s"); end
-        _phantom(m3,mats,ds)
+        _phantom(lbl,mats;nz=nz)
     end
     const SCANNER=BS.Scanner(source_to_isocenter=625.6,source_to_detector=1100.0,detector_rows=256,detector_cols=834,
         detector_row_size=0.625,detector_col_size=0.6,focal_spot_width=1.0,focal_spot_length=1.0,
@@ -178,7 +180,7 @@ begin
         ciod=viod.*1000f0
         (hu40=BS.synth_vmi_2basis(vwat,ciod;energy_keV=E40),hu70=BS.synth_vmi_2basis(vwat,ciod;energy_keV=E70),geom=slo.geom)
     end
-    function roi_cores(pc,geom,matrix,labels; radius_px=7)
+    function roi_cores(pc,geom,matrix,labels; radius_px=12)
         m3=BS.resample_to_recon(pc,geom,matrix;method=:nearest); midz=size(m3,3)÷2+1; m2=m3[:,:,midz]
         nx,ny=size(m2); out=Dict{Int,Vector{CartesianIndex{2}}}()
         for lab in labels; idx=findall(==(UInt8(lab)),m2); isempty(idx)&&continue
@@ -186,7 +188,7 @@ begin
             out[lab]=[CartesianIndex(i,j) for j in 1:ny,i in 1:nx if (i-cx)^2+(j-cy)^2≤radius_px^2]; end
         (cores=out,midz=midz,m2=m2)
     end
-    function collect_rois(acq,pc,label_comp; radius_px=7)
+    function collect_rois(acq,pc,label_comp; radius_px=12)
         rc=roi_cores(pc,acq.geom,(512,512,3),collect(keys(label_comp)); radius_px=radius_px); out=NamedTuple[]
         for (lab,c) in label_comp
             (haskey(rc.cores,lab)&&!isempty(rc.cores[lab]))||continue; ci=rc.cores[lab]
@@ -195,15 +197,14 @@ begin
         end
         (rois=out,midz=rc.midz,m2=rc.m2)
     end
-    md"`build_rods` · `build_sectors` · `run_acq` (:dd_fast, 3-slice) · `roi_cores` / `collect_rois`"
+    md"`build_rods` (13 ø28mm) · `build_sectors` · `run_acq` (:dd_fast, 3-slice) · `roi_cores` / `collect_rois` (r=12 px ≈ 250 mm²)"
 end
 
 # ╔═╡ aaaa0011-0000-4000-8000-000000000011
 md"""## 5 · Inverse: calibration surface · noise · prior
-**Calibration surface** ``f=\\mathrm{poly}_2(\\mathrm{HU}_{40},\\mathrm{HU}_{70})`` fit from known mixtures
-(the user's "f vs μ" relationship). Noise: convex-quadratic
-``\\sigma_E(\\mathrm{HU})=a\\,\\mathrm{HU}^2+b\\,\\mathrm{HU}+c`` + inter-energy ``\\rho``. Adipose prior
-``\\mathcal N(f_w)\\,\\mathcal N(f_l)\\,\\Gamma(f_p)`` for the Bayesian per-voxel refinement."""
+**Calibration surface** ``f=\\mathrm{poly}_2(\\mathrm{HU}_{40},\\mathrm{HU}_{70})`` fit from known mixtures.
+Noise: convex-quadratic ``\\sigma_E(\\mathrm{HU})=a\\,\\mathrm{HU}^2+b\\,\\mathrm{HU}+c`` + inter-energy
+``\\rho``. Adipose prior ``\\mathcal N(f_w)\\,\\mathcal N(f_l)\\,\\Gamma(f_p)`` for Bayesian per-voxel refinement."""
 
 # ╔═╡ aaaa0012-0000-4000-8000-000000000012
 begin
@@ -266,7 +267,6 @@ begin
     mw=metrics(tfw,pfw);ml=metrics(tfl,pfl);mp=metrics(tfp,pfp)
     dHU40=[abs(mix_hu(pfw[i],pfl[i],pfp[i],E40)-mix_hu(tfw[i],tfl[i],tfp[i],E40)) for i in eachindex(tfw)]
     dHU70=[abs(mix_hu(pfw[i],pfl[i],pfp[i],E70)-mix_hu(tfw[i],tfl[i],tfp[i],E70)) for i in eachindex(tfw)]
-    # per-region POOLED delivered map (uniform per rod)
     mlc2=Dict(ROD0-1+k=>mapcomps[k] for k in 1:NROD)
     truemap=fill(NaN,size(map_m2)...,3); recmap=fill(NaN,size(map_m2)...,3); rodmask=falses(size(map_m2))
     for lab in ROD0:(ROD0+NROD-1)
@@ -281,7 +281,7 @@ begin
 end
 
 # ╔═╡ aaaa0015-0000-4000-8000-000000000015
-md"## 7 · Relationship plots & delivered maps"
+md"## 7 · Relationship plots, delivered maps & validation"
 
 # ╔═╡ aaaa0016-0000-4000-8000-000000000016
 let f=CM.Figure(size=(1100,520)), flcol=[r.fl for r in calrois]
@@ -349,7 +349,7 @@ let f=CM.Figure(size=(1200,1050)), names=("f_w","f_l","f_p")
             hm=CM.heatmap!(ax,img;colormap=cm,colorrange=cr); (col==3)&&CM.Colorbar(f[row,4],hm)
         end
     end
-    CM.Label(f[0,:],"Delivered per-region pooled maps vs ground truth (circular test phantom, ±0.1 error scale)";fontsize=14,font=:bold)
+    CM.Label(f[0,:],"Delivered per-region pooled maps vs ground truth (13 ø28mm rods, ±0.1 error scale)";fontsize=14,font=:bold)
     safe_save(joinpath(ASSET,"fig6_maps.png"),f); f
 end
 
@@ -377,7 +377,28 @@ let f=CM.Figure(size=(1100,460))
 end
 
 # ╔═╡ aaaa0024-0000-4000-8000-000000000024
-md"""## 8 · Validation & conclusion
+let f=CM.Figure(size=(900,460)), pxmm=380/512
+    radii=4:2:14; areas=Float64[];noise=Float64[];sems=Float64[]
+    for r in radii
+        push!(areas, π*(r*pxmm)^2); vs=Float64[];ss=Float64[]
+        for lab in ROD0:(ROD0+NROD-1)
+            idx=findall(==(UInt8(lab)),map_m2); isempty(idx)&&continue
+            cx=mean(getindex.(idx,1));cy=mean(getindex.(idx,2))
+            ci=[I for I in idx if (I[1]-cx)^2+(I[2]-cy)^2≤r^2]; length(ci)<4&&continue
+            fw=[decode(Float64(map40[I]),Float64(map70[I]))[1] for I in ci]
+            push!(vs,std(fw)); push!(ss,std(fw)/sqrt(length(ci)))
+        end
+        push!(noise,mean(vs)); push!(sems,mean(ss))
+    end
+    ax=CM.Axis(f[1,1];xlabel="ROI area (mm²)",ylabel="f_w uncertainty",title="Bigger ROI → tighter pooled estimate (√N); ø28mm rod ≈ $(round(π*(RODMM/2)^2,digits=0)) mm²")
+    CM.lines!(ax,areas,noise;color=:tomato); CM.scatter!(ax,areas,noise;color=:tomato,label="per-voxel σ(f_w)")
+    CM.lines!(ax,areas,sems;color=:royalblue); CM.scatter!(ax,areas,sems;color=:royalblue,label="pooled SEM(f_w)")
+    CM.vlines!(ax,[200.0];color=:gray,linestyle=:dash,label="200 mm²"); CM.axislegend(ax;position=:rt)
+    safe_save(joinpath(ASSET,"fig9_roi_area.png"),f); f
+end
+
+# ╔═╡ aaaa0025-0000-4000-8000-000000000025
+md"""## 8 · Conclusion
 
 | fraction | CCC | slope | RMSE |
 |---|---|---|---|
@@ -389,12 +410,14 @@ Detectability: **$(round(100mean(dHU70.<5),digits=0))% of ROIs < 5 HU at 70 keV*
 $(round(mean(dHU40),digits=1)) HU at 40 keV.
 
 **Conclusion.** With a **quantitative** 2-basis DECT simulation (BasisSimulator v0.8.0, `:dd_fast`
-projector — pure lipid −205 vs theoretical −213), water/lipid/protein volume fractions are all recovered
-with **CCC > 0.9** and ROI accuracy within ~2 HU at 70 keV. The decode is a simple calibration surface
-fit from known mixtures; the recon is linear-additive (calibration in-sample R²(f_w) = $(round(r2cal(cw,fwc),digits=2))),
-so the triangle is well-conditioned and no strong prior is needed. The earlier apparent "f_water ceiling"
-was entirely an artifact of the old v0.2.1 forward projector, which compressed non-water HU by ~50 HU —
-a reminder to **validate the simulator against pure-material theoretical HU before trusting any decode.**
+projector — pure lipid −205 vs theoretical −213) and ø28 mm rods (ROI ≈ 250 mm²), water/lipid/protein
+volume fractions are all recovered with **CCC ≈ 0.99** and ROI accuracy within ~1 HU at 70 keV. The decode
+is a simple calibration surface fit from known mixtures; the recon is linear-additive (calibration in-sample
+R²(f_w) = $(round(r2cal(cw,fwc),digits=2))), so the triangle is well-conditioned and no strong prior is
+needed. Two lessons: (1) **validate the simulator against pure-material theoretical HU** before trusting a
+decode — the earlier apparent "f_water ceiling" was entirely the old v0.2.1 projector compressing non-water
+HU by ~50 HU; (2) **ROI area matters** — per-voxel σ(f_w) is irreducible, but pooling over a ≥200 mm² ROI
+drives SEM below 0.025 (fig 9).
 """
 
 # ╔═╡ Cell order:
@@ -421,4 +444,5 @@ a reminder to **validate the simulator against pure-material theoretical HU befo
 # ╠═aaaa0021-0000-4000-8000-000000000021
 # ╠═aaaa0022-0000-4000-8000-000000000022
 # ╠═aaaa0023-0000-4000-8000-000000000023
-# ╟─aaaa0024-0000-4000-8000-000000000024
+# ╠═aaaa0024-0000-4000-8000-000000000024
+# ╟─aaaa0025-0000-4000-8000-000000000025
