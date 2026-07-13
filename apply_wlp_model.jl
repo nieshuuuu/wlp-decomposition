@@ -169,4 +169,6 @@ function selfcheck(dir=@__DIR__; tag="70_150")
     println("SELF-CHECK PASS — extraction is lossless.")
 end
 
-abspath(PROGRAM_FILE) == @__FILE__ && selfcheck()
+if abspath(PROGRAM_FILE) == @__FILE__
+    selfcheck()
+end
