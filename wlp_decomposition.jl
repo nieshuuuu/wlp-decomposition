@@ -346,6 +346,34 @@ begin
     decode(a,b)=(x=surf(cw,a,b);y=surf(cl,a,b);z=surf(cp,a,b);s=x+y+z;(x/s,y/s,z/s))
     aff_l(a,b)=cl_aff[1]+cl_aff[2]*a+cl_aff[3]*b
 
+    # ── out-of-triangle handling: noise-ellipse (Mahalanobis) MLE projection onto the simplex ──
+    # The raw surface decode divides by the sum, so a noisy HU can decode to an INFEASIBLE
+    # (negative) composition. The maximum-likelihood feasible composition is the point on the
+    # decomposition triangle closest to the measurement in the noise metric Σ⁻¹ (not Euclidean:
+    # σ₇₀≫σ₁₅₀ and ρ≈0.79, so the noise ball is a tilted ellipse). G maps (f_l,f_p) → measured HU;
+    # bias_hu = mean(recon − linear-mix theory) over the cal rods de-biases the exact inverse.
+    Gmat = [PL[1]-PW[1] PP[1]-PW[1]; PL[2]-PW[2] PP[2]-PW[2]]
+    Σhu  = (s70=std(res40); s150=std(res70); [s70^2 ρ*s70*s150; ρ*s70*s150 s150^2])
+    Σinv = inv(Σhu); Amet = Gmat' * Σinv * Gmat                    # metric on (f_l,f_p)
+    bias_hu = [mean(m40c .- [r.fl*PL[1]+r.fp*PP[1] for r in calrois]),
+               mean(m70c .- [r.fl*PL[2]+r.fp*PP[2] for r in calrois])]
+    insimplex(fl,fp) = fl≥-1e-9 && fp≥-1e-9 && (fl+fp)≤1+1e-9
+    function proj_simplex(θ)                                        # θ=(f_l,f_p); Mahalanobis-closest vertex/edge
+        insimplex(θ...) && return θ
+        V=([0.0,0.0],[1.0,0.0],[0.0,1.0]); best=V[1]; bd=Inf        # water, lipid, protein corners
+        for (p,q) in ((V[1],V[2]),(V[1],V[3]),(V[2],V[3]))
+            u=q.-p; t=clamp(dot(u,Amet*(collect(θ).-p))/dot(u,Amet*u),0.0,1.0); c=p.+t.*u
+            dv=c.-collect(θ); d=dot(dv,Amet*dv); d<bd && (bd=d; best=c)
+        end
+        (best[1],best[2])
+    end
+    # feasible decode: interior → validated surface; exterior → bias-corrected G-inverse, MLE-projected
+    function decode_feas(a,b)
+        r=(surf(cw,a,b),surf(cl,a,b),surf(cp,a,b))
+        all(r.≥-1e-9) && (s=sum(r); return (r[1]/s,r[2]/s,r[3]/s))
+        θ=Gmat\([a,b].-bias_hu); (fl,fp)=proj_simplex((θ[1],θ[2])); (1-fl-fp,fl,fp)
+    end
+
     # ── point accuracy: combined circular + sector, per-voxel decode over the eroded core (GT only locates) ──
     allrois=vcat(testrois,sectrois); geomtag=vcat(fill(:circular,length(testrois)),fill(:sector,length(sectrois)))
     tfw=[r.fw for r in allrois];tfl=[r.fl for r in allrois];tfp=[r.fp for r in allrois]
@@ -356,6 +384,20 @@ begin
     mw=metrics(tfw,pfw);ml=metrics(tfl,pfl);mp=metrics(tfp,pfp)
     pfl_pool=[decode(r.m40,r.m70)[2] for r in allrois]; ml_pool=metrics(tfl,pfl_pool)
     dHU70=[abs(mix_hu(pfw[i],pfl[i],pfp[i],E70)-mix_hu(tfw[i],tfl[i],tfp[i],E70)) for i in eachindex(tfw)]
+
+    # ── out-of-triangle diagnostic + feasible pooled decode (noise-ellipse MLE) ──
+    # Per-voxel decodes leave the simplex under noise; that is EXPECTED (a near-edge composition
+    # scattered by ε). We do NOT project per-voxel — rectifying each voxel before averaging would
+    # bias the ROI mean (Jensen). We report the per-voxel infeasible rate, then deliver the pooled
+    # ROI decode through decode_feas so any ROI whose MEAN still lands outside is MLE-projected.
+    nvox_all=sum(length(r.v40) for r in allrois)
+    nvox_out=sum(count(any(decode(r.v40[j],r.v70[j]).<-1e-6) for j in eachindex(r.v40)) for r in allrois)
+    nroi_out=count(any(decode(r.m40,r.m70).<-1e-6) for r in allrois)
+    pfeas=[decode_feas(r.m40,r.m70) for r in allrois]                 # feasible-by-construction ROI composition
+    pfw_feas=getindex.(pfeas,1); pfl_feas=getindex.(pfeas,2); pfp_feas=getindex.(pfeas,3)
+    mw_feas=metrics(tfw,pfw_feas); ml_feas=metrics(tfl,pfl_feas); mp_feas=metrics(tfp,pfp_feas)
+    @printf("OUT-OF-TRIANGLE: per-voxel %d/%d (%.1f%%) infeasible | ROI-mean %d/%d | pooled-feasible CCC f_w=%.3f f_l=%.3f f_p=%.3f\n",
+            nvox_out,nvox_all,100nvox_out/nvox_all,nroi_out,length(allrois),mw_feas.ccc,ml_feas.ccc,mp_feas.ccc)
 
     # ── delivered map: per-voxel decode over gated soft tissue + σ_f-weighted edge-preserving Huber-TV ──
     const SOFT_HU_LO, SOFT_HU_HI = -300.0, 250.0
@@ -420,18 +462,99 @@ begin
     Markdown.parse("cal n=$(length(calrois)), R²(f_w)=$(round(r2fit(cw,fwc),digits=3)); **TEST n=$(length(allrois))** ($(count(==(:circular),geomtag)) circular + $(count(==(:sector),geomtag)) sector) — f_w CCC=**$(round(mw.ccc,digits=3))**, f_l CCC=**$(round(ml.ccc,digits=3))**, f_p CCC=**$(round(mp.ccc,digits=3))**; ρ=$(round(ρ,digits=2)); integrated-HU recovers $(round(Int,100*minimum(r.intlip/r.truelip for r in integ)))–$(round(Int,100*maximum(r.intlip/r.truelip for r in integ)))% vs naive $(round(Int,100*minimum(r.naivelip/r.truelip for r in integ)))–$(round(Int,100*maximum(r.naivelip/r.truelip for r in integ)))%.")
 end
 
+# ╔═╡ aaaa0026-0000-4000-8000-000000000026
+# Portable model export — this notebook is the SINGLE producer of wlp_model_<pair>.toml;
+# apply_wlp_model.jl (stdlib-only) consumes it on arbitrary co-registered VMI pairs.
+# The cal table (ROI means/stds + true fractions) is included so a new chain can refit
+# the same recipe; per-voxel data stays in the .jls caches.
+begin
+    import TOML
+    const MODEL_TOML = joinpath(@__DIR__, "wlp_model_$(PTAG).toml")
+    open(MODEL_TOML, "w") do io
+        TOML.print(io, Dict(
+            "pair" => Dict("E_low_keV"=>E40, "E_high_keV"=>E70),
+            "endpoints_hu" => Dict("water"=>collect(PW), "lipid"=>collect(PL), "protein"=>collect(PP)),
+            "poly2" => Dict("basis"=>"[1, hLow, hHigh, hLow^2, hHigh^2, hLow*hHigh] -> (fw,fl,fp), normalized by sum",
+                "cw"=>cw, "cl"=>cl, "cp"=>cp, "cl_affine"=>cl_aff),
+            "noise" => Dict("sigma_quad_low"=>sc40, "sigma_quad_high"=>sc70, "rho"=>ρ,
+                "Sigma_hu"=>[collect(Σhu[i,:]) for i in 1:2], "bias_hu"=>bias_hu),
+            "gate" => Dict("soft_hu_lo"=>SOFT_HU_LO, "soft_hu_hi"=>SOFT_HU_HI),
+            "provenance" => Dict("source"=>"wlp_decomposition.jl",
+                "chain"=>"80/140kVp EICT (:dd_fast) -> Cong water/iodine -> FBP $(RECON_N)px/$(Int(RECON_FOV_MM))mm -> VMI $(PTAG) keV; stadium QRM-thorax",
+                "cal_n"=>length(calrois), "r2_fw_fit"=>r2fit(cw,fwc), "test_n"=>length(allrois),
+                "test_ccc"=>[mw.ccc, ml.ccc, mp.ccc], "test_rmse"=>[mw.rmse, ml.rmse, mp.rmse]),
+            "calibration_table" => Dict("fw"=>fwc, "fl"=>flc, "fp"=>fpc,
+                "hu_low_mean"=>m40c, "hu_high_mean"=>m70c,
+                "hu_low_std"=>[r.s40 for r in calrois], "hu_high_std"=>[r.s70 for r in calrois],
+                "n_vox"=>[length(r.v40) for r in calrois]),
+        ))
+    end
+    Markdown.parse("**Model exported** → `$(basename(MODEL_TOML))` (poly2 surface + noise + gate + calibration table; consumer: `apply_wlp_model.jl`).")
+end
+
 # ╔═╡ aaaa0015-0000-4000-8000-000000000015
 md"## 7 · Figures"
 
 # ╔═╡ aaaa0016-0000-4000-8000-000000000016
-let f=CM.Figure(size=(600,560)), flcol=[r.fl for r in calrois]
-    ax=CM.Axis(f[1,1];xlabel="HU$(Int(E40))",ylabel="HU$(Int(E70))",title="Barycentric triangle · $(Int(E40)) vs $(Int(E70)) keV",aspect=CM.DataAspect())
-    CM.poly!(ax,[CM.Point2f(PW...),CM.Point2f(PL...),CM.Point2f(PP...)];color=(:steelblue,0.15),strokecolor=:gray,strokewidth=1)
-    sc=CM.scatter!(ax,m40c,m70c;color=flcol,colormap=:viridis,markersize=9)
-    for (p,t) in ((PW,"W"),(PL,"L"),(PP,"P")); CM.scatter!(ax,[p[1]],[p[2]];marker=:diamond,color=:black,markersize=13); CM.text!(ax,p[1],p[2];text=t,fontsize=16,align=(:center,:bottom)); end
-    CM.Colorbar(f[1,2],sc;label="true f_l")
-    CM.Label(f[0,:],"Calibration cores fall inside the theoretical W/L/P triangle";fontsize=13,font=:bold)
-    safe_save(joinpath(ASSET,"fig1_triangle.png"),f); f
+# Barycentric triangle + noise-ellipse MLE, in ONE figure: Panel A = the full W/L/P sliver
+# (every test voxel, coloured by whether its raw decode is feasible); Panel B = a zoom on the
+# water–lipid corner showing the Σ noise ellipse and the out-of-triangle ROI means projected
+# back onto the triangle in the Mahalanobis (Σ⁻¹) metric. Rebuilds from the decode-cell globals.
+let
+    # ── per-voxel HU + feasibility across all scored ROIs (circular + sector) ──
+    HUx=Float64[]; HUy=Float64[]; feas=Bool[]
+    for r in allrois, j in eachindex(r.v40)
+        d=decode(r.v40[j],r.v70[j]); push!(HUx,r.v40[j]); push!(HUy,r.v70[j]); push!(feas, all(d.≥-1e-9))
+    end
+    stride=max(1,length(HUx)÷5000); ss=1:stride:length(HUx)                       # deterministic thin for plotting
+    fin=[i for i in ss if feas[i]]; fout=[i for i in ss if !feas[i]]
+    pv_out=100*count(!,feas)/length(feas)
+    rmx=[r.m40 for r in allrois]; rmy=[r.m70 for r in allrois]
+    rout=findall(any(decode(r.m40,r.m70).<-1e-6) for r in allrois)                 # ROI means outside the simplex
+    condG=cond(Gmat); s70v=sqrt(Σhu[1,1]); s150v=sqrt(Σhu[2,2])
+    CIN=CM.RGBf(0.353,0.655,0.353); COUT=CM.RGBf(0.557,0.373,0.659)                # feasible / infeasible
+    CWv=CM.RGBf(0.231,0.459,0.690); CLv=CM.RGBf(0.910,0.639,0.239); CPv=CM.RGBf(0.757,0.267,0.235)
+    zx0,zx1,zy0,zy1=-125.0,20.0,-95.0,15.0                                          # zoom window (water–lipid corner)
+
+    f=CM.Figure(size=(1180,520))
+    # ── Panel A: the whole triangle (equal aspect ⇒ the sliver is honest) ──
+    axA=CM.Axis(f[1,1];xlabel="HU @ $(Int(E40)) keV",ylabel="HU @ $(Int(E70)) keV",
+                title="The W/L/P triangle is a sliver (cond G = $(round(condG,digits=1)))",aspect=CM.DataAspect())
+    CM.poly!(axA,[CM.Point2f(PW...),CM.Point2f(PL...),CM.Point2f(PP...)];color=(:gray,0.10),strokecolor=(:black,0.45),strokewidth=1.2)
+    CM.scatter!(axA,HUx[fin],HUy[fin];color=(CIN,0.30),markersize=3,label="decode inside")
+    CM.scatter!(axA,HUx[fout],HUy[fout];color=(COUT,0.35),markersize=3,label="decode outside ($(round(pv_out,digits=1))%)")
+    for (p,c,t) in ((PW,CWv,"water"),(PL,CLv,"lipid"),(PP,CPv,"protein"))
+        CM.scatter!(axA,[p[1]],[p[2]];color=c,markersize=13,strokecolor=:white,strokewidth=1.2)
+        CM.text!(axA,p[1],p[2];text=t,fontsize=11,color=c,font=:bold,align=(:left,:bottom))
+    end
+    CM.lines!(axA,[zx0,zx1,zx1,zx0,zx0],[zy0,zy0,zy1,zy1,zy0];color=(:black,0.6),linestyle=:dash,linewidth=1.0)
+    CM.text!(axA,zx1,zy1;text="B",fontsize=11,font=:bold,color=(:black,0.7),align=(:left,:bottom))
+    CM.axislegend(axA;position=:lt,framevisible=false,labelsize=9)
+    # ── Panel B: zoom on the water–lipid corner + noise ellipse + MLE projections ──
+    axB=CM.Axis(f[1,2];xlabel="HU @ $(Int(E40)) keV",ylabel="HU @ $(Int(E70)) keV",
+                title="Out-of-triangle ROI means → Σ⁻¹ (Mahalanobis) MLE projection",limits=(zx0,zx1,zy0,10.0))
+    CM.poly!(axB,[CM.Point2f(PW...),CM.Point2f(PL...),CM.Point2f(PP...)];color=(:gray,0.10),strokecolor=(:black,0.45),strokewidth=1.2)
+    inz=[i for i in 1:length(HUx) if zx0≤HUx[i]≤zx1 && zy0≤HUy[i]≤zy1]
+    inz=inz[1:max(1,length(inz)÷4000):end]
+    CM.scatter!(axB,HUx[[i for i in inz if feas[i]]],HUy[[i for i in inz if feas[i]]];color=(CIN,0.22),markersize=3)
+    CM.scatter!(axB,HUx[[i for i in inz if !feas[i]]],HUy[[i for i in inz if !feas[i]]];color=(COUT,0.26),markersize=3)
+    ev=eigen(Σhu); anchor=[-84.0,-55.0]                                            # ellipse in empty space below the cloud
+    for k in (1.0,2.0)
+        pts=[anchor.+k.*(sqrt(ev.values[1])*cos(τ).*ev.vectors[:,1].+sqrt(ev.values[2])*sin(τ).*ev.vectors[:,2]) for τ in range(0,2π,length=140)]
+        CM.lines!(axB,first.(pts),last.(pts);color=:black,linewidth=(k==1.0 ? 1.6 : 1.0),linestyle=(k==1.0 ? :solid : :dash))
+    end
+    CM.scatter!(axB,[anchor[1]],[anchor[2]];color=:black,markersize=5)
+    CM.text!(axB,anchor[1],anchor[2]-7;text="noise Σ  (σ₇₀=$(round(s70v,digits=1)), σ₁₅₀=$(round(s150v,digits=1)), ρ=$(round(ρ,digits=2)))\n1σ / 2σ contours",fontsize=8,align=(:center,:top))
+    for i in rout                                                                  # measured mean → feasible edge point
+        θ=Gmat\([rmx[i],rmy[i]].-bias_hu); (fl,fp)=proj_simplex((θ[1],θ[2])); hp=Gmat*[fl,fp]
+        CM.lines!(axB,[rmx[i],hp[1]],[rmy[i],hp[2]];color=COUT,linewidth=1.3)
+        CM.scatter!(axB,[hp[1]],[hp[2]];marker=:utriangle,color=COUT,markersize=8)
+    end
+    CM.scatter!(axB,rmx[rout],rmy[rout];color=COUT,markersize=10,strokecolor=:white,strokewidth=0.9)
+    CM.scatter!(axB,[rmx[i] for i in 1:length(rmx) if !(i in rout)],[rmy[i] for i in 1:length(rmy) if !(i in rout)];color=(CIN,0.6),markersize=7)
+    for (p,c,t) in ((PW,CWv,"water"),(PL,CLv,"lipid")); CM.scatter!(axB,[p[1]],[p[2]];color=c,markersize=13,strokecolor=:white,strokewidth=1.2); CM.text!(axB,p[1],p[2];text=t,fontsize=11,color=c,font=:bold,align=(:left,:bottom)); end
+    CM.Label(f[0,:],"Decomposition triangle + noise model: $(round(pv_out,digits=1))% of voxels decode outside the simplex under noise (96% within 2σ); only $(length(rout))/$(length(allrois)) ROI means need the pooled MLE projection";fontsize=12,font=:bold)
+    safe_save(joinpath(ASSET,"fig_decode_triangle_noise.png"),f); f
 end
 
 # ╔═╡ aaaa0017-0000-4000-8000-000000000017
@@ -597,6 +720,7 @@ only for linear/FBP recon, so a clinical DLIR/QIR transfer must re-earn it empir
 # ╠═aaaa0012-0000-4000-8000-000000000012
 # ╟─aaaa0013-0000-4000-8000-000000000013
 # ╠═aaaa0014-0000-4000-8000-000000000014
+# ╠═aaaa0026-0000-4000-8000-000000000026
 # ╟─aaaa0015-0000-4000-8000-000000000015
 # ╠═aaaa0016-0000-4000-8000-000000000016
 # ╠═aaaa0017-0000-4000-8000-000000000017
