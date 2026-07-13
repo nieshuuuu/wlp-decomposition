@@ -231,6 +231,12 @@ md"## 5 · Inverse: calibration surface · noise · edge-preserving TV"
 # ╔═╡ aaaa0012-0000-4000-8000-000000000012
 begin
     poly2(h4,h7)=[1.0,h4,h7,h4^2,h7^2,h4*h7]; surf(c,h4,h7)=dot(c,poly2(h4,h7))
+    # equality-constrained least squares: min ‖Xc−y‖² s.t. Ac=b (KKT normal eqns).
+    # Used to PIN each surface to the barycentric indicator at the pure endpoints
+    # so pure water/lipid/protein decode to exactly 100% — the unconstrained LS
+    # extrapolates the endpoints (cal rods never reach a pure corner) and bends
+    # away from the lipid corner, reading near-pure fat systematically low.
+    cls(X,y,A,b)=(n=size(X,2);m=size(A,1);([2*(X'X) A';A zeros(m,m)]\[2*(X'y);b])[1:n])
     quad_sigma(c,H)=c[1]*H^2+c[2]*H+c[3]
     fit_sigma_quad(hu,sig)=(X=hcat(hu.^2,hu,ones(length(hu)));c=X\sig;c[1]<0&&(Xa=hcat(hu,ones(length(hu)));ca=Xa\sig;c=[0.0,ca[1],ca[2]]);c)
     function metrics(t,r)
@@ -337,7 +343,9 @@ begin
     # ── calibration: quadratic surface (point accuracy) + AFFINE lipid (integrals) + noise ladder ──
     m40c=[r.m40 for r in calrois]; m70c=[r.m70 for r in calrois]
     fwc=[r.fw for r in calrois]; flc=[r.fl for r in calrois]; fpc=[r.fp for r in calrois]
-    Xc=reduce(vcat,[poly2(m40c[i],m70c[i])' for i in eachindex(m40c)]); cw=Xc\fwc; cl=Xc\flc; cp=Xc\fpc
+    Xc=reduce(vcat,[poly2(m40c[i],m70c[i])' for i in eachindex(m40c)])
+    Eanc=reduce(vcat,[poly2(PW...)',poly2(PL...)',poly2(PP...)'])          # basis at water/lipid/protein endpoints
+    cw=cls(Xc,fwc,Eanc,[1.0,0.0,0.0]); cl=cls(Xc,flc,Eanc,[0.0,1.0,0.0]); cp=cls(Xc,fpc,Eanc,[0.0,0.0,1.0])   # pinned ⇒ pure endpoints decode to 100%
     Xa=hcat(ones(length(m40c)),m40c,m70c); cl_aff=Xa\flc                 # affine f_l — linear ⇒ commutes with the PSF
     r2fit(c,y)=1-sum((surf.(Ref(c),m40c,m70c).-y).^2)/sum((y.-mean(y)).^2)
     sc40=fit_sigma_quad(m40c,[r.s40 for r in calrois]); sc70=fit_sigma_quad(m70c,[r.s70 for r in calrois])

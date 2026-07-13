@@ -127,10 +127,21 @@ function decode_maps_tv(M::WLPModel, mlo, mhi; lambda=0.05, iters=25, eps=0.04)
 end
 
 # ── refit for a NEW chain: same recipe as the notebook's calibration cell ──
-function fit_surface(m_lo, m_hi, fw, fl, fp)
+# `endpoints = (water, lipid, protein)` HU pairs pin each surface to the
+# barycentric indicator there, so pure materials decode to exactly 100% (the
+# unconstrained LS extrapolates the endpoints and reads near-pure fat low). Pass
+# `endpoints=nothing` for the legacy unconstrained fit.
+cls(X, y, A, b) = (n = size(X, 2); m = size(A, 1);
+    ([2 * (X'X) A'; A zeros(m, m)] \ [2 * (X'y); b])[1:n])
+function fit_surface(m_lo, m_hi, fw, fl, fp; endpoints=nothing)
     X = reduce(vcat, [poly2(m_lo[i], m_hi[i])' for i in eachindex(m_lo)])
     Xa = hcat(ones(length(m_lo)), m_lo, m_hi)
-    (cw = X \ fw, cl = X \ fl, cp = X \ fp, cl_aff = Xa \ fl)
+    if endpoints === nothing
+        return (cw = X \ fw, cl = X \ fl, cp = X \ fp, cl_aff = Xa \ fl)
+    end
+    E = reduce(vcat, [poly2(endpoints[k]...)' for k in 1:3])   # water/lipid/protein
+    (cw = cls(X, fw, E, [1.0, 0.0, 0.0]), cl = cls(X, fl, E, [0.0, 1.0, 0.0]),
+     cp = cls(X, fp, E, [0.0, 0.0, 1.0]), cl_aff = Xa \ fl)
 end
 fit_sigma_quad(hu, sig) = (X = hcat(hu .^ 2, hu, ones(length(hu))); c = X \ sig;
     c[1] < 0 && (Xa = hcat(hu, ones(length(hu))); ca = Xa \ sig; c = [0.0, ca[1], ca[2]]); c)
