@@ -65,6 +65,15 @@ end
 shared_gate(v70, v150) = (v70 .≥ HU_L[1] - 40) .& (v70 .≤ 150) .&
                          (v150 .≥ M.hu_lo) .& (v150 .≤ M.hu_hi)
 
+# spectral iodine gate: r = v70 − 1.375·v150 nulls the water/lipid axis, so iodine (r≈250) and
+# bone (r≈232) stand out while soft tissue/protein stay small (fat≈−11, muscle≈−17, protein≈−129).
+# Rejecting high-r (not the crude v70>150) keeps fat+iodine partial-volume near vessels; widened
+# low bound (−200) recovers low-HU fat. 2-energy caveat: admitted blood-adjacent voxels can't be
+# fully un-mixed → mild iodine bias in their W/L/P (a 3-energy scan would fix this).
+iod_r(v70, v150) = v70 .- 1.375 .* v150
+spectral_gate(v70, v150) = (v70 .≥ -200) .& (iod_r(v70, v150) .< 105) .&
+                           (v150 .≥ M.hu_lo) .& (v150 .≤ M.hu_hi)
+
 # ── 3-material estimator with tissue prior (per 2-D slice) ─────────────────────────────────────
 # Water/lipid FIRST (clean 1-D GLS on the raw HU = 2-material image quality), then admit protein
 # only where a STRONGLY-smoothed, L1-thresholded off-line signal survives. Where f_p→0 the lipid
@@ -124,12 +133,13 @@ fat2 = Float64[]; fat3 = Float64[]                          # fat-ROI f_l pooled
 for z in SHOWZ
     a = v70f[:, :, z]; b = v150f[:, :, z]
     fl2 = fl2v[:, :, z-Z0+1]
-    gate = shared_gate(a, b) .& .!isnan.(fl2)              # identical voxel set for both methods
-    fw3, fl3, fp3 = decompose3(a, b, gate, Σh)
-    fl2d = tv2(fl2, gate)                                   # 2-material delivered (matched TV)
-    fatm = erode1((a .≥ -130) .& (a .≤ -70) .& (b .≥ -110) .& (b .≤ -50) .& gate)  # uniform fat ROI
+    g2 = .!isnan.(fl2)                                     # 2-material's own gate (theolipid, v70≤150)
+    g3 = spectral_gate(a, b)                               # 3-material: spectral iodine gate (recovers peri-vascular fat)
+    fw3, fl3, fp3 = decompose3(a, b, g3, Σh)
+    fl2d = tv2(fl2, g2)                                    # 2-material delivered (matched TV)
+    fatm = erode1((a .≥ -130) .& (a .≤ -70) .& (b .≥ -110) .& (b .≤ -50) .& g3)  # uniform subcut-fat ROI
     append!(fat2, filter(isfinite, fl2d[fatm])); append!(fat3, filter(isfinite, fl3[fatm]))
-    hum[z] = (a = a, fw3 = fw3, fl3 = fl3, fp3 = fp3, fl2 = fl2d, gate = gate, fatm = fatm)
+    hum[z] = (a = a, fw3 = fw3, fl3 = fl3, fp3 = fp3, fl2 = fl2d, g3 = g3, fatm = fatm)
 end
 sd2 = std(fat2 .- mean(fat2)); sd3 = std(fat3 .- mean(fat3))
 @printf("fat ROI %d vox · mean f_l 2-mat %.3f  3-mat %.3f\n", length(fat2), mean(fat2), mean(fat3))
@@ -140,7 +150,7 @@ print("β sweep fat σ(f_l):")
 for β in (0.0, 0.06, 0.12, 0.18, 0.24)
     acc = Float64[]
     for z in SHOWZ
-        h = hum[z]; _, fl, _ = decompose3(h.a, v150f[:, :, z], h.gate, Σh; beta = β)
+        h = hum[z]; _, fl, _ = decompose3(h.a, v150f[:, :, z], h.g3, Σh; beta = β)
         append!(acc, filter(isfinite, fl[h.fatm]))
     end
     @printf("  β=%.2f→%.3f", β, std(acc .- mean(acc)))
@@ -231,7 +241,7 @@ h70f = load_raw(joinpath(HAMRAW, "hamid_study3_large_mono70keV_512x512x45_float3
 h150f = load_raw(joinpath(HAMRAW, "hamid_study3_large_mono150keV_512x512x45_float32.raw"))
 const HZM = 23                                              # z=22 (0-idx) canonical rod slice
 a = h70f[:, :, HZM]; b = h150f[:, :, HZM]
-gate = shared_gate(a, b)
+gate = spectral_gate(a, b)
 
 # 2-material baseline: frozen GLS, theoretical anchors, flat σ line (uniform phantom), ρ from fat body
 fatm = erode1((a .≥ -120) .& (a .≤ -45) .& (a .> -500))
