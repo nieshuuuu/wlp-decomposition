@@ -150,7 +150,7 @@ for (r, z) in enumerate(SHOWZ)
     panels = [("70 keV CT", ct, :grays, (-160, 240), nothing),
               ("f_w  (jet)", disp(h.fw3), :jet, (0, 1), ct),
               ("f_l  lipid  (jet)", disp(h.fl3), :jet, (0, 1), ct),
-              ("f_p  protein/fibrous  (jet)", disp(h.fp3), :jet, (0, 1), ct)]
+              ("f_p  protein/fibrous  (jet, 0–0.4)", disp(h.fp3), :jet, (0, 0.4), ct)]
     for (c, (ttl, img, cmap, cr, under)) in enumerate(panels)
         ax = CM.Axis(figH1[r, c]; title = r == 1 ? ttl : "", titlesize = 13)
         CM.hidedecorations!(ax); ax.aspect = CM.DataAspect()
@@ -172,7 +172,7 @@ for (r, z) in enumerate(SHOWZ)
     panels = [("70 keV CT", ct, :grays, (-160, 240), nothing),
               ("f_l  2-material (baseline)", disp(h.fl2), :jet, (0, 1), ct),
               ("f_l  3-material", disp(h.fl3), :jet, (0, 1), ct),
-              ("f_p  3-material (protein/fibrous)", disp(h.fp3), :jet, (0, 1), ct),
+              ("f_p  3-material (0–0.4)", disp(h.fp3), :jet, (0, 0.4), ct),
               ("excess water in 2-mat  (f_w²−f_w³)", disp(exc), :balance, (-0.5, 0.5), ct)]
     for (c, (ttl, img, cmap, cr, under)) in enumerate(panels)
         ax = CM.Axis(figH2[r, c]; title = r == 1 ? ttl : "", titlesize = 12)
@@ -186,6 +186,36 @@ end
 CM.Label(figH2[0, :], "57955439 — 2-material vs 3-material (identical anchors + gate). Pericardium/fibrous appears in f_p; 2-material misassigns it as water (right).";
          fontsize = 13, font = :bold)
 CM.save(joinpath(OUT, "compare_2mat_vs_3mat_57955439.png"), figH2; px_per_unit = 1.2)
+
+# ── FIGURE H3: pericardial-fat zoom — inflammation surrogate (f_w in fat) + pericardium (f_p) ──
+function heart_box(a; pad = 140)
+    idx = findall(a .> 220)                                 # iodine blood pool ⇒ heart centre
+    isempty(idx) && return (axes(a, 1), axes(a, 2))
+    ci = clamp(round(Int, median(getindex.(idx, 1))), 1, size(a, 1))
+    cj = clamp(round(Int, median(getindex.(idx, 2))), 1, size(a, 2))
+    (max(1, ci - pad):min(size(a, 1), ci + pad), max(1, cj - pad):min(size(a, 2), cj + pad))
+end
+figH3 = CM.Figure(size = (1400, 350 * length(SHOWZ)))
+for (r, z) in enumerate(SHOWZ)
+    h = hum[z]; ri, rj = heart_box(h.a)
+    ct = disp(h.a[ri, rj])
+    panels = [("70 keV CT", ct, :grays, (-160, 240), nothing),
+              ("f_l  lipid", disp(h.fl3[ri, rj]), :jet, (0, 1), ct),
+              ("f_w  water  (fat inflammation surrogate)", disp(h.fw3[ri, rj]), :jet, (0, 0.5), ct),
+              ("f_p  protein/fibrous  (pericardium)", disp(h.fp3[ri, rj]), :jet, (0, 0.4), ct)]
+    for (c, (ttl, img, cmap, cr, under)) in enumerate(panels)
+        ax = CM.Axis(figH3[r, c]; title = r == 1 ? ttl : "", titlesize = 12)
+        CM.hidedecorations!(ax); ax.aspect = CM.DataAspect()
+        under !== nothing && CM.heatmap!(ax, under; colormap = :grays, colorrange = (-160, 240))
+        hm = CM.heatmap!(ax, img; colormap = cmap, colorrange = cr, nan_color = (:black, 0.0))
+        c == 1 && CM.text!(ax, 8, 14; text = "z=$z", color = :yellow, fontsize = 12)
+        (r == 1 && c ≥ 2) && CM.Colorbar(figH3[r, c, CM.Right()], hm; width = 10)
+    end
+end
+CM.Label(figH3[0, :], "57955439 — pericardial-fat zoom. Inflamed fat = higher f_w within lipid; pericardium/fibrous = f_p (invisible to the 2-material model).";
+         fontsize = 13, font = :bold)
+CM.save(joinpath(OUT, "fwlp_pericardium_zoom_57955439.png"), figH3; px_per_unit = 1.3)
+
 v70f = nothing; v150f = nothing; fl2v = nothing; GC.gc()
 
 # ════════════════════════════════════════════════════════════════════════════════════════════
@@ -225,7 +255,7 @@ pan = [("70 keV CT", disp(a), :grays, (-160, 400), nothing),
        ("soft-tissue gate", disp(Float64.(gate)), :grays, (0, 1), nothing),
        ("f_l  2-material", disp(hfl2d), :jet, (0, 1), disp(a)),
        ("f_l  3-material", disp(hfl3), :jet, (0, 1), disp(a)),
-       ("f_p  3-material", disp(hfp3), :jet, (0, 1), disp(a))]
+       ("f_p  3-material (0–0.4)", disp(hfp3), :jet, (0, 0.4), disp(a))]
 for (c, (ttl, img, cmap, cr, under)) in enumerate(pan)
     ax = CM.Axis(figP[1, c]; title = ttl, titlesize = 12)
     CM.hidedecorations!(ax); ax.aspect = CM.DataAspect()
