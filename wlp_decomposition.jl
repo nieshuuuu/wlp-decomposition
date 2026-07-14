@@ -35,7 +35,7 @@ Woodard adipose CSV for the prior): mix materials by volume fraction, simulate 8
 **70 and 150 keV** (the `WLP_PAIR` knob; 150 keV is a clinically standard VMI), and invert.
 
 **Two complementary products.**
-1. A **quadratic calibration surface** ``f=\mathrm{poly}_2(\mathrm{HU}_{40},\mathrm{HU}_{70})`` for per-voxel
+1. A **quadratic calibration surface** ``f=\mathrm{poly}_2(\mathrm{HU}_{70},\mathrm{HU}_{150})`` for per-voxel
    point accuracy, delivered as a **boundary-agnostic** map (per-voxel decode + σ_f-weighted edge-preserving
    Huber-TV — never the ground-truth boundary, which real fat doesn't give you).
 2. An **integrated-HU** (mass-conservation) estimator for the PVE-robust *total* lipid: a normalized recon PSF
@@ -231,12 +231,6 @@ md"## 5 · Inverse: calibration surface · noise · edge-preserving TV"
 # ╔═╡ aaaa0012-0000-4000-8000-000000000012
 begin
     poly2(h4,h7)=[1.0,h4,h7,h4^2,h7^2,h4*h7]; surf(c,h4,h7)=dot(c,poly2(h4,h7))
-    # equality-constrained least squares: min ‖Xc−y‖² s.t. Ac=b (KKT normal eqns).
-    # Used to PIN each surface to the barycentric indicator at the pure endpoints
-    # so pure water/lipid/protein decode to exactly 100% — the unconstrained LS
-    # extrapolates the endpoints (cal rods never reach a pure corner) and bends
-    # away from the lipid corner, reading near-pure fat systematically low.
-    cls(X,y,A,b)=(n=size(X,2);m=size(A,1);([2*(X'X) A';A zeros(m,m)]\[2*(X'y);b])[1:n])
     quad_sigma(c,H)=c[1]*H^2+c[2]*H+c[3]
     fit_sigma_quad(hu,sig)=(X=hcat(hu.^2,hu,ones(length(hu)));c=X\sig;c[1]<0&&(Xa=hcat(hu,ones(length(hu)));ca=Xa\sig;c=[0.0,ca[1],ca[2]]);c)
     function metrics(t,r)
