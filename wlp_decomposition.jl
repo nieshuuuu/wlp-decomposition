@@ -75,7 +75,9 @@ begin
     const WLP_PAIR = (70.0, 150.0)        # ← the keV pair knob (this branch tests 70/150; main uses 40/70)
     const ELO, EHI = WLP_PAIR             # low / high energy of the pair
     const PL = (theo_hu(LIPID,ELO), theo_hu(LIPID,EHI)); const PP = (theo_hu(PROTEIN,ELO), theo_hu(PROTEIN,EHI)); const PW = (0.0, 0.0)
-    md"Endpoints (theoretical HU): water=(0,0), lipid=$(round.(PL,digits=0)), protein=$(round.(PP,digits=0))."
+    # md-macro interpolation breaks on repeated `=$` adjacency — interpolate pre-formatted strings
+    pl_str = string(round.(Int, PL)); pp_str = string(round.(Int, PP))
+    md"Endpoints (theoretical HU): water = (0,0), lipid = $pl_str, protein = $pp_str."
 end
 
 # ╔═╡ aaaa0007-0000-4000-8000-000000000007
@@ -327,7 +329,7 @@ begin
     label_centroid(m2,lab)=(idx=findall(==(UInt8(lab)),m2); (mean(getindex.(idx,1)),mean(getindex.(idx,2))))
     struct BayesPrior; μ_w::Float64; s_w::Float64; μ_l::Float64; s_l::Float64; α_p::Float64; θ_p::Float64; end
     bayes_prior_broad(comps;s_wl=0.15,fp_shape=1.2,fp_scale=0.10)=(fw=[c[1] for c in comps];fl=[c[2] for c in comps];BayesPrior(mean(fw),s_wl,mean(fl),s_wl,fp_shape,fp_scale))
-    md"`surf` (calibration) · `fit_sigma_quad` · `metrics` (CCC…) · `tv_coupled` (σ_f Huber-TV) · `bayes_prior_broad`"
+    md"`surf` (calibration) · `fit_sigma_quad` · `metrics` (CCC…) · `tv_coupled` (σ\_f Huber-TV) · `bayes_prior_broad`"
 end
 
 # ╔═╡ aaaa0013-0000-4000-8000-000000000013
@@ -526,7 +528,7 @@ begin
         cond([PL[1]-PW[1] PP[1]-PW[1]; PL[2]-PW[2] PP[2]-PW[2]]),
         100*minimum(r.intlip/r.truelip for r in integ),100*maximum(r.intlip/r.truelip for r in integ),
         100*minimum(r.naivelip/r.truelip for r in integ),100*maximum(r.naivelip/r.truelip for r in integ))
-    Markdown.parse("cal n=$(length(calrois)), R²(f_w)=$(round(r2fit(cw,fwc),digits=3)); **TEST n=$(length(allrois))** ($(count(==(:circular),geomtag)) circular + $(count(==(:sector),geomtag)) sector) — f_w CCC=**$(round(mw.ccc,digits=3))**, f_l CCC=**$(round(ml.ccc,digits=3))**, f_p CCC=**$(round(mp.ccc,digits=3))**; ρ=$(round(ρ,digits=2)); integrated-HU recovers $(round(Int,100*minimum(r.intlip/r.truelip for r in integ)))–$(round(Int,100*maximum(r.intlip/r.truelip for r in integ)))% vs naive $(round(Int,100*minimum(r.naivelip/r.truelip for r in integ)))–$(round(Int,100*maximum(r.naivelip/r.truelip for r in integ)))%.")
+    Markdown.parse("cal n=$(length(calrois)), R²(f\\_w)=$(round(r2fit(cw,fwc),digits=3)); **TEST n=$(length(allrois))** ($(count(==(:circular),geomtag)) circular + $(count(==(:sector),geomtag)) sector) — f\\_w CCC=**$(round(mw.ccc,digits=3))**, f\\_l CCC=**$(round(ml.ccc,digits=3))**, f\\_p CCC=**$(round(mp.ccc,digits=3))**; ρ=$(round(ρ,digits=2)); integrated-HU recovers $(round(Int,100*minimum(r.intlip/r.truelip for r in integ)))–$(round(Int,100*maximum(r.intlip/r.truelip for r in integ)))% vs naive $(round(Int,100*minimum(r.naivelip/r.truelip for r in integ)))–$(round(Int,100*maximum(r.naivelip/r.truelip for r in integ)))%.")
 end
 
 # ╔═╡ aaaa0026-0000-4000-8000-000000000026
