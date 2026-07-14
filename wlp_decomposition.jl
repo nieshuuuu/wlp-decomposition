@@ -170,6 +170,27 @@ begin
     md"`draw_wlp` (adipose prior, Woodard KDE) · `diverse_comps` (spanning test set)"
 end
 
+# ╔═╡ aaaa0029-0000-4000-8000-000000000029
+# Woodard & White 1986 Fig. 1, reproduced from the inlined ADIPOSE_CSV — this is the data
+# `draw_wlp` fits its prior to, plotted so the table is visible without an external file.
+# Colour = component, marker = provenance (● tabulated value, ✚ digitized from the figure).
+let f=CM.Figure(size=(900,480))
+    raw=readdlm(IOBuffer(ADIPOSE_CSV),','; header=false); hdr=string.(raw[1,:]); rows=raw[2:end,:]
+    ci(x)=findfirst(==(x),hdr); cc,cl,cp,cv=ci("component"),ci("lipid_pct"),ci("component_pct"),ci("provenance")
+    CWv=CM.RGBf(0.231,0.459,0.690); CPv=CM.RGBf(0.757,0.267,0.235); CAv=CM.RGBf(0.50,0.50,0.50)
+    ax=CM.Axis(f[1,1];xlabel="lipid (mass %)",ylabel="component (mass %)",limits=(40,92,-2,56))
+    CM.vlines!(ax,50;color=:gray,linestyle=:dash)
+    CM.text!(ax,50.8,55;text="→ draw_wlp keeps lipid ≥ 50 %",color=:gray,fontsize=10,align=(:left,:top))
+    for (comp,col) in (("water",CWv),("protein",CPv),("ash",CAv)), (prov,mk) in (("paper",:circle),("figure",:cross))
+        s=[i for i in axes(rows,1) if string(rows[i,cc])==comp && string(rows[i,cv])==prov]
+        isempty(s) && continue
+        CM.scatter!(ax,[Float64(rows[i,cl]) for i in s],[Float64(rows[i,cp]) for i in s];color=col,marker=mk,markersize=10,label="$comp ($prov)")
+    end
+    CM.axislegend(ax;position=:rt,framevisible=false,labelsize=9)
+    CM.Label(f[0,:],"Adipose composition vs lipid fraction — Woodard & White 1986 Fig. 1 · $(size(rows,1)) points, 7 studies · ● tabulated  ✚ digitized";fontsize=12,font=:bold)
+    safe_save(joinpath(ASSET,"fig1_adipose_composition.png"),f); f
+end
+
 # ╔═╡ aaaa0009-0000-4000-8000-000000000009
 md"""## 4 · Stadium QRM-thorax phantom & forward acquisition
 Faithful PCATSim geometry: fat-ring/muscle/lung **stadiums**, two lungs split by the mediastinal muscle
@@ -531,6 +552,42 @@ begin
     Markdown.parse("cal n=$(length(calrois)), R²(f\\_w)=$(round(r2fit(cw,fwc),digits=3)); **TEST n=$(length(allrois))** ($(count(==(:circular),geomtag)) circular + $(count(==(:sector),geomtag)) sector) — f\\_w CCC=**$(round(mw.ccc,digits=3))**, f\\_l CCC=**$(round(ml.ccc,digits=3))**, f\\_p CCC=**$(round(mp.ccc,digits=3))**; ρ=$(round(ρ,digits=2)); integrated-HU recovers $(round(Int,100*minimum(r.intlip/r.truelip for r in integ)))–$(round(Int,100*maximum(r.intlip/r.truelip for r in integ)))% vs naive $(round(Int,100*minimum(r.naivelip/r.truelip for r in integ)))–$(round(Int,100*maximum(r.naivelip/r.truelip for r in integ)))%.")
 end
 
+# ╔═╡ aaaa0030-0000-4000-8000-000000000030
+# The phantom label map as every downstream figure actually sees it: `map_m2` / `smap_m2`, i.e. the
+# 0.4 mm mask nearest-neighbour resampled to the 512² recon grid, mid-slice. Axes are phantom-frame
+# mm (not pixels) so the geometry is readable directly; yreversed ⇒ spine down = standard CT view.
+# Left: 13 hex-packed circular inserts (calibration + circular test). Right: 16 sector wedges, the
+# held-out test geometry. Insert numbers k index `mcomps[k]` / `scomps[k]` — label = ROD0-1+k.
+let f=CM.Figure(size=(1320,600))
+    x_mm(i)=185.0+(-RECON_FOV_MM/2+RECON_PX_MM/2+(i-1)*RECON_PX_MM)   # recon px → phantom mm (auto-centred on isocentre)
+    y_mm(j)=135.0+(-RECON_FOV_MM/2+RECON_PX_MM/2+(j-1)*RECON_PX_MM)
+    TIS=(0x00=>("air",CM.RGBf(1.00,1.00,1.00)), 0x01=>("lung",CM.RGBf(0.78,0.86,0.93)),
+         0x02=>("muscle",CM.RGBf(0.75,0.44,0.42)), 0x03=>("cortical bone",CM.RGBf(0.93,0.91,0.83)),
+         0x04=>("red marrow",CM.RGBf(0.85,0.55,0.58)), 0x05=>("adipose (fat ring)",CM.RGBf(0.97,0.83,0.46)))
+    INS=CM.RGBf(0.231,0.459,0.690); cmap=Dict(k=>c for (k,(_,c)) in TIS)
+    colorize(m)=[get(cmap,l,INS) for l in m]                          # anything ≥ ROD0 is a WLP insert
+    xr=(185.0-RECON_FOV_MM/2,185.0+RECON_FOV_MM/2); yr=(135.0-RECON_FOV_MM/2,135.0+RECON_FOV_MM/2)  # image! wants outer edges
+    θ=range(0,2π,200)
+    for (col,(m,cmps,ttl)) in enumerate(((map_m2,mcomps,"circular — $(length(mcomps)) hex-packed inserts, ø$(round(2*INS_R,digits=1)) mm"),
+                                         (smap_m2,scomps,"sector — $(length(scomps)) wedges, r ≤ $(Int(SECT_R_MM)) mm (held-out)")))
+        ax=CM.Axis(f[1,col];aspect=CM.DataAspect(),yreversed=true,xlabel="x (mm)",ylabel=col==1 ? "y (mm)" : "",title=ttl,titlesize=11)
+        CM.image!(ax,xr,yr,colorize(m))
+        CM.lines!(ax,HC_X.+HEART_R_MM.*cos.(θ),HC_Y.+HEART_R_MM.*sin.(θ);color=:black,linestyle=:dash,linewidth=1.1)
+        CM.text!(ax,HC_X+HEART_R_MM+6,HC_Y;text="heart cavity\nr = $(Int(HEART_R_MM)) mm",fontsize=9,align=(:left,:center))
+        for k in 1:length(cmps)
+            ci,cj=label_centroid(m,UInt8(ROD0-1+k)); isnan(ci) && continue
+            CM.text!(ax,x_mm(ci),y_mm(cj);text=string(k),color=:white,fontsize=9,font=:bold,align=(:center,:center))
+        end
+    end
+    swatch(c)=CM.PolyElement(color=c,strokecolor=CM.RGBf(0.6,0.6,0.6),strokewidth=0.5)   # stroke: air is white-on-white
+    els=CM.PolyElement[]; lbls=String[]
+    for (k,(n,c)) in TIS; push!(els,swatch(c)); push!(lbls,"$(Int(k)) · $n"); end
+    push!(els,swatch(INS)); push!(lbls,"$(ROD0)+ · WLP inserts")
+    CM.Legend(f[1,3],els,lbls,"label → material";framevisible=false,labelsize=10,titlesize=10)
+    CM.Label(f[0,:],"QRM-thorax phantom label map — 512² recon grid, mid-slice, phantom-frame mm · posterior down · numbers index mcomps/scomps";fontsize=12,font=:bold)
+    safe_save(joinpath(ASSET,"fig_phantom_labels.png"),f); f
+end
+
 # ╔═╡ aaaa0026-0000-4000-8000-000000000026
 # Portable model snapshot — dumps the fitted surface + noise + gate + calibration table to
 # wlp_model_<pair>.toml (stdlib TOML, no BasisSimulator), so the model can be applied outside
@@ -842,27 +899,6 @@ local background must be a field (not a constant) because PVAT muscle isn't unif
 only for linear/FBP recon, so a clinical DLIR/QIR transfer must re-earn it empirically.
 """)
 
-# ╔═╡ aaaa0029-0000-4000-8000-000000000029
-# Woodard & White 1986 Fig. 1, reproduced from the inlined ADIPOSE_CSV — this is the data
-# `draw_wlp` fits its prior to, plotted so the table is visible without an external file.
-# Colour = component, marker = provenance (● tabulated value, ✚ digitized from the figure).
-let f=CM.Figure(size=(900,480))
-    raw=readdlm(IOBuffer(ADIPOSE_CSV),','; header=false); hdr=string.(raw[1,:]); rows=raw[2:end,:]
-    ci(x)=findfirst(==(x),hdr); cc,cl,cp,cv=ci("component"),ci("lipid_pct"),ci("component_pct"),ci("provenance")
-    CWv=CM.RGBf(0.231,0.459,0.690); CPv=CM.RGBf(0.757,0.267,0.235); CAv=CM.RGBf(0.50,0.50,0.50)
-    ax=CM.Axis(f[1,1];xlabel="lipid (mass %)",ylabel="component (mass %)",limits=(40,92,-2,56))
-    CM.vlines!(ax,50;color=:gray,linestyle=:dash)
-    CM.text!(ax,50.8,55;text="→ draw_wlp keeps lipid ≥ 50 %",color=:gray,fontsize=10,align=(:left,:top))
-    for (comp,col) in (("water",CWv),("protein",CPv),("ash",CAv)), (prov,mk) in (("paper",:circle),("figure",:cross))
-        s=[i for i in axes(rows,1) if string(rows[i,cc])==comp && string(rows[i,cv])==prov]
-        isempty(s) && continue
-        CM.scatter!(ax,[Float64(rows[i,cl]) for i in s],[Float64(rows[i,cp]) for i in s];color=col,marker=mk,markersize=10,label="$comp ($prov)")
-    end
-    CM.axislegend(ax;position=:rt,framevisible=false,labelsize=9)
-    CM.Label(f[0,:],"Adipose composition vs lipid fraction — Woodard & White 1986 Fig. 1 · $(size(rows,1)) points, 7 studies · ● tabulated  ✚ digitized";fontsize=12,font=:bold)
-    safe_save(joinpath(ASSET,"fig1_adipose_composition.png"),f); f
-end
-
 # ╔═╡ Cell order:
 # ╟─aaaa0002-0000-4000-8000-000000000002
 # ╟─aaaa0003-0000-4000-8000-000000000003
@@ -875,6 +911,7 @@ end
 # ╠═aaaa0029-0000-4000-8000-000000000029
 # ╟─aaaa0009-0000-4000-8000-000000000009
 # ╠═aaaa0010-0000-4000-8000-000000000010
+# ╠═aaaa0030-0000-4000-8000-000000000030
 # ╟─aaaa0011-0000-4000-8000-000000000011
 # ╠═aaaa0012-0000-4000-8000-000000000012
 # ╟─aaaa0013-0000-4000-8000-000000000013
@@ -893,4 +930,3 @@ end
 # ╠═aaaa0023-0000-4000-8000-000000000023
 # ╠═aaaa0024-0000-4000-8000-000000000024
 # ╟─aaaa0025-0000-4000-8000-000000000025
-# ╠═aaaa0029-0000-4000-8000-000000000029
