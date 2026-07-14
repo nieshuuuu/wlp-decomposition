@@ -32,8 +32,15 @@ const HU_W = (0.0, 0.0)
 const HU_L = (-111.695, -81.213)                             # NIST triglyceride, shared by both methods
 const M = load_wlp_model(joinpath(WLP, "wlp_model_70_150.toml"))
 const PL = M.G[:, 1]; const PP = M.G[:, 2]                   # lipid / protein endpoint vectors (water=0)
-const Σi = inv(M.Σhu); const plΣpl = (PL' * Σi * PL)
 const BETA = 0.12                                            # L1 protein-admission threshold (tuned below)
+
+# local noise covariance measured from a scan's own uniform-fat ROI (endpoints stay theoretical NIST)
+function measure_Σ(a, b, mask)
+    r70 = Float64.(a[mask]); r150 = Float64.(b[mask])
+    r70 .-= mean(r70); r150 .-= mean(r150)
+    σ7 = std(r70); σ1 = std(r150); ρ = cor(r70, r150)
+    ([σ7^2 ρ*σ7*σ1; ρ*σ7*σ1 σ1^2], σ7, σ1, ρ)
+end
 
 # ── helpers ──────────────────────────────────────────────────────────────────────────────────
 function load_raw(path)
@@ -63,8 +70,8 @@ shared_gate(v70, v150) = (v70 .≥ HU_L[1] - 40) .& (v70 .≤ 150) .&
 # only where a STRONGLY-smoothed, L1-thresholded off-line signal survives. Where f_p→0 the lipid
 # fraction is exactly the 2-material projection, so clean fat keeps 2-material noise; f_p appears
 # only in spatially-coherent fibrous/pericardial tissue.
-gls_fl(d1, d2) = (PL[1] * (Σi[1, 1] * d1 + Σi[1, 2] * d2) + PL[2] * (Σi[2, 1] * d1 + Σi[2, 2] * d2)) / plΣpl
-function decompose3(a, b, gate; beta = BETA, sm_lambda = 0.12, sm_iters = 50)
+function decompose3(a, b, gate, Σloc; beta = BETA, sm_lambda = 0.12, sm_iters = 50)
+    Σil = inv(Σloc); den = (PL' * Σil * PL)                  # 1-D GLS weighting on the SCAN's own noise
     fw_u, fl_u, fp_u = decode_maps(M, a, b)                  # raw per-voxel decode (wlp-gated)
     w = sigma_f_weight(M, a, b)
     _, fp_s = tv_coupled(fl_u, fp_u, gate; lambda = sm_lambda, iters = sm_iters, eps = 0.04, w = w)  # smooth protein
@@ -74,7 +81,8 @@ function decompose3(a, b, gate; beta = BETA, sm_lambda = 0.12, sm_iters = 50)
         gate[i, j] || continue
         fps = fp_s[i, j]; isfinite(fps) || continue
         fp = max(fps - beta, 0.0)                            # L1 protein admission (else 0)
-        fl = gls_fl(a[i, j] - fp * PP[1], b[i, j] - fp * PP[2])   # lipid from RAW HU, protein removed
+        d1 = a[i, j] - fp * PP[1]; d2 = b[i, j] - fp * PP[2]  # lipid from RAW HU, protein removed
+        fl = (PL[1] * (Σil[1, 1]*d1 + Σil[1, 2]*d2) + PL[2] * (Σil[2, 1]*d1 + Σil[2, 2]*d2)) / den
         fl = clamp(fl, 0.0, 1.0)
         if fl + fp > 1; s = fl + fp; fl /= s; fp /= s; end
         FL[i, j] = fl; FP[i, j] = fp; FW[i, j] = 1 - fl - fp
@@ -93,13 +101,27 @@ v70f = load_raw(joinpath(RAW, "naeotom_57955439_mono70keV_513x512x339_float32.ra
 v150f = load_raw(joinpath(RAW, "naeotom_57955439_mono150keV_513x512x339_float32.raw"))
 fl2v = load_raw(joinpath(THEO, "fl_theolipid_57955439_513x512x141_float32.raw"))   # 2-mat, raw, slab
 
+# measure the human scan's own noise covariance from uniform subcut fat (pooled over slices)
+let r70 = Float64[], r150 = Float64[]
+    global Σh, σ7h, σ1h, ρh
+    for z in SHOWZ
+        a = v70f[:, :, z]; b = v150f[:, :, z]
+        fm = erode1((a .≥ -130) .& (a .≤ -70) .& (b .≥ -110) .& (b .≤ -50))
+        va = Float64.(a[fm]); vb = Float64.(b[fm])
+        append!(r70, va .- mean(va)); append!(r150, vb .- mean(vb))
+    end
+    σ7h = std(r70); σ1h = std(r150); ρh = cor(r70, r150)
+    Σh = [σ7h^2 ρh*σ7h*σ1h; ρh*σ7h*σ1h σ1h^2]
+end
+@printf("human fat noise σ70/σ150 = %.1f/%.1f  ρ=%.2f\n", σ7h, σ1h, ρh)
+
 hum = Dict{Int,NamedTuple}()
 fat2 = Float64[]; fat3 = Float64[]                          # fat-ROI f_l pooled over slices
 for z in SHOWZ
     a = v70f[:, :, z]; b = v150f[:, :, z]
     fl2 = fl2v[:, :, z-Z0+1]
     gate = shared_gate(a, b) .& .!isnan.(fl2)              # identical voxel set for both methods
-    fw3, fl3, fp3 = decompose3(a, b, gate)
+    fw3, fl3, fp3 = decompose3(a, b, gate, Σh)
     fl2d = tv2(fl2, gate)                                   # 2-material delivered (matched TV)
     fatm = erode1((a .≥ -130) .& (a .≤ -70) .& (b .≥ -110) .& (b .≤ -50) .& gate)  # uniform fat ROI
     append!(fat2, filter(isfinite, fl2d[fatm])); append!(fat3, filter(isfinite, fl3[fatm]))
@@ -114,7 +136,7 @@ print("β sweep fat σ(f_l):")
 for β in (0.0, 0.06, 0.12, 0.18, 0.24)
     acc = Float64[]
     for z in SHOWZ
-        h = hum[z]; _, fl, _ = decompose3(h.a, v150f[:, :, z], h.gate; beta = β)
+        h = hum[z]; _, fl, _ = decompose3(h.a, v150f[:, :, z], h.gate, Σh; beta = β)
         append!(acc, filter(isfinite, fl[h.fatm]))
     end
     @printf("  β=%.2f→%.3f", β, std(acc .- mean(acc)))
@@ -184,7 +206,8 @@ fr70 = Float64.(a[fatm]) .- mean(Float64.(a[fatm])); fr150 = Float64.(b[fatm]) .
 out2 = decompose_volume(a, b; HU_w = HU_W, HU_l = HU_L, ab_low = (0.0, σ70), ab_high = (0.0, σ150), rho = ρ)
 hfw2 = out2.fhat; hfl2 = 1.0 .- hfw2; hfl2[.!gate] .= NaN
 hfl2d = tv2(hfl2, gate)
-hfw3, hfl3, hfp3 = decompose3(a, b, gate)
+Σp = [σ70^2 ρ*σ70*σ150; ρ*σ70*σ150 σ150^2]                 # phantom's own measured noise cov
+hfw3, hfl3, hfp3 = decompose3(a, b, gate, Σp)
 @printf("phantom fat ROI %d vox · σ_HU 70/150 = %.1f/%.1f · ρ=%.2f\n", count(fatm), σ70, σ150, ρ)
 @printf("phantom fat body  mean f_l: 2-mat %.3f  3-mat %.3f  (f_p %.3f)\n",
         mean(filter(isfinite, hfl2d[fatm])), mean(filter(isfinite, hfl3[fatm])), mean(filter(isfinite, hfp3[fatm])))
