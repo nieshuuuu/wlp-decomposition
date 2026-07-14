@@ -76,7 +76,7 @@ function decompose3(a, b, gate, Σloc; beta = BETA, sm_lambda = 0.12, sm_iters =
     w = sigma_f_weight(M, a, b)
     _, fp_s = tv_coupled(fl_u, fp_u, gate; lambda = sm_lambda, iters = sm_iters, eps = 0.04, w = w)  # smooth protein
     nx, ny = size(a)
-    FW = fill(NaN, nx, ny); FL = similar(FW); FP = similar(FW)
+    FL = fill(NaN, nx, ny); FP = similar(FL)
     @inbounds for j in 1:ny, i in 1:nx
         gate[i, j] || continue
         fps = fp_s[i, j]; isfinite(fps) || continue
@@ -85,9 +85,11 @@ function decompose3(a, b, gate, Σloc; beta = BETA, sm_lambda = 0.12, sm_iters =
         fl = (PL[1] * (Σil[1, 1]*d1 + Σil[1, 2]*d2) + PL[2] * (Σil[2, 1]*d1 + Σil[2, 2]*d2)) / den
         fl = clamp(fl, 0.0, 1.0)
         if fl + fp > 1; s = fl + fp; fl /= s; fp /= s; end
-        FL[i, j] = fl; FP[i, j] = fp; FW[i, j] = 1 - fl - fp
+        FL[i, j] = fl; FP[i, j] = fp
     end
-    (FW, FL, FP)
+    FLd, FPd = tv_coupled(FL, FP, gate; lambda = 0.05, iters = 25, eps = 0.04, w = w)  # DELIVERED TV (same as 2-mat)
+    FW = [gate[i, j] ? 1 - FLd[i, j] - FPd[i, j] : NaN for i in 1:nx, j in 1:ny]
+    (FW, FLd, FPd)
 end
 tv2(y, gate) = tv_denoise_weighted(y, Float64.(gate); lambda = 0.05, iters = 25, huber_eps = 0.04, mask = gate)
 
