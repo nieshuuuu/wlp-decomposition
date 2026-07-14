@@ -91,7 +91,9 @@ function decompose3(a, b, gate, Σloc; beta = BETA, sm_lambda = 0.12, sm_iters =
     FW = [gate[i, j] ? 1 - FLd[i, j] - FPd[i, j] : NaN for i in 1:nx, j in 1:ny]
     (FW, FLd, FPd)
 end
-tv2(y, gate) = tv_denoise_weighted(y, Float64.(gate); lambda = 0.05, iters = 25, huber_eps = 0.04, mask = gate)
+# 2-material delivered TV via the SAME coupled routine as 3-material (fp≡0) — identical smoothing,
+# so the σ comparison reflects the decomposition, not two different denoisers.
+tv2(y, gate) = tv_coupled(y, fill(0.0, size(y)), gate; lambda = 0.05, iters = 25, eps = 0.04)[1]
 
 # ════════════════════════════════════════════════════════════════════════════════════════════
 # TARGET 1 — human CCTA 57955439 (process the 3 display slices only; all the figure + σ needs)
