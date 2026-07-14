@@ -87,7 +87,7 @@ function decompose3(a, b, gate, Σloc; beta = BETA, sm_lambda = 0.12, sm_iters =
         if fl + fp > 1; s = fl + fp; fl /= s; fp /= s; end
         FL[i, j] = fl; FP[i, j] = fp
     end
-    FLd, FPd = tv_coupled(FL, FP, gate; lambda = 0.05, iters = 25, eps = 0.04, w = w)  # DELIVERED TV (same as 2-mat)
+    FLd, FPd = tv_coupled(FL, FP, gate; lambda = 0.05, iters = 25, eps = 0.04)  # DELIVERED TV, uniform weight (matches 2-mat tv2)
     FW = [gate[i, j] ? 1 - FLd[i, j] - FPd[i, j] : NaN for i in 1:nx, j in 1:ny]
     (FW, FLd, FPd)
 end
