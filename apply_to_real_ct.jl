@@ -199,9 +199,10 @@ figH3 = CM.Figure(size = (1400, 350 * length(SHOWZ)))
 for (r, z) in enumerate(SHOWZ)
     h = hum[z]; ri, rj = heart_box(h.a)
     ct = disp(h.a[ri, rj])
+    fwfat = copy(h.fw3); fwfat[h.fl3 .< 0.4] .= NaN         # water fraction WITHIN lipid-dominant fat
     panels = [("70 keV CT", ct, :grays, (-160, 240), nothing),
               ("f_l  lipid", disp(h.fl3[ri, rj]), :jet, (0, 1), ct),
-              ("f_w  water  (fat inflammation surrogate)", disp(h.fw3[ri, rj]), :jet, (0, 0.5), ct),
+              ("f_w in fat  (inflammation surrogate, 0–0.35)", disp(fwfat[ri, rj]), :jet, (0, 0.35), ct),
               ("f_p  protein/fibrous  (pericardium)", disp(h.fp3[ri, rj]), :jet, (0, 0.4), ct)]
     for (c, (ttl, img, cmap, cr, under)) in enumerate(panels)
         ax = CM.Axis(figH3[r, c]; title = r == 1 ? ttl : "", titlesize = 12)
