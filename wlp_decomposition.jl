@@ -4,12 +4,31 @@
 using Markdown
 using InteractiveUtils
 
+# ╔═╡ aaaa0001-0000-4000-8000-000000000001
+begin
+    import Pkg
+    Pkg.activate(@__DIR__)
+end
+
+# ╔═╡ aaaa0004-0000-4000-8000-000000000004
+begin
+    import BasisSimulator as BS
+    import Metal
+    import CairoMakie as CM
+    using Unitful, LinearAlgebra, Statistics, Random, DelimitedFiles, Printf, Serialization
+    to_gpu(x) = Metal.functional() ? Metal.MtlArray(x) : x
+    const DATA = joinpath(@__DIR__, "data")
+    const ASSET = joinpath(@__DIR__, "assets")
+    safe_save(p, f; pu=1.4) = CM.save(p, f; px_per_unit=pu)   # figures ≤1520 wide ⇒ ≤2130 px; keep ≤2000 side
+    md"imports · GPU backend (Metal, CPU fallback) · `safe_save`"
+end
+
 # ╔═╡ aaaa0002-0000-4000-8000-000000000002
 md"""
 # Water–Lipid–Protein Material Decomposition on a QRM-Thorax — a pure-physics study
 
 Recover the **volumetric fractions** ``(f_w, f_l, f_p)`` of water/lipid/protein mixtures from dual-energy CT
-on a **stadium QRM-thorax phantom** (faithful PCATSim geometry: two lungs split by a mediastinal muscle column,
+on a **stadium QRM-thorax phantom** (two lungs split by a mediastinal muscle column,
 ribs, spine, and a heart cavity holding the material inserts). Everything is inline (the only data file is the
 Woodard adipose CSV for the prior): mix materials by volume fraction, simulate 80/140-kVp DECT with
 [BasisSimulator.jl](https://github.com/MolloiLab/BasisSimulator.jl) **(v0.8.0, `:dd_fast`)**, synthesize VMI at
@@ -34,25 +53,6 @@ Woodard adipose CSV for the prior): mix materials by volume fraction, simulate 8
 
 # ╔═╡ aaaa0003-0000-4000-8000-000000000003
 md"## 1 · Setup"
-
-# ╔═╡ aaaa0001-0000-4000-8000-000000000001
-begin
-    import Pkg
-    Pkg.activate(@__DIR__)
-end
-
-# ╔═╡ aaaa0004-0000-4000-8000-000000000004
-begin
-    import BasisSimulator as BS
-    import Metal
-    import CairoMakie as CM
-    using Unitful, LinearAlgebra, Statistics, Random, DelimitedFiles, Printf, Serialization
-    to_gpu(x) = Metal.functional() ? Metal.MtlArray(x) : x
-    const DATA = joinpath(@__DIR__, "data")
-    const ASSET = joinpath(@__DIR__, "assets")
-    safe_save(p, f; pu=1.4) = CM.save(p, f; px_per_unit=pu)   # figures ≤1520 wide ⇒ ≤2130 px; keep ≤2000 side
-    md"imports · GPU backend (Metal, CPU fallback) · `safe_save`"
-end
 
 # ╔═╡ aaaa0005-0000-4000-8000-000000000005
 md"## 2 · Materials & theoretical endpoints"
@@ -344,8 +344,7 @@ begin
     m40c=[r.m40 for r in calrois]; m70c=[r.m70 for r in calrois]
     fwc=[r.fw for r in calrois]; flc=[r.fl for r in calrois]; fpc=[r.fp for r in calrois]
     Xc=reduce(vcat,[poly2(m40c[i],m70c[i])' for i in eachindex(m40c)])
-    Eanc=reduce(vcat,[poly2(PW...)',poly2(PL...)',poly2(PP...)'])          # basis at water/lipid/protein endpoints
-    cw=cls(Xc,fwc,Eanc,[1.0,0.0,0.0]); cl=cls(Xc,flc,Eanc,[0.0,1.0,0.0]); cp=cls(Xc,fpc,Eanc,[0.0,0.0,1.0])   # pinned ⇒ pure endpoints decode to 100%
+    cw=Xc\fwc; cl=Xc\flc; cp=Xc\fpc                                       # unconstrained LS — pinning to theoretical corners bent near-pure-fat 3× (2026-07-14)
     Xa=hcat(ones(length(m40c)),m40c,m70c); cl_aff=Xa\flc                 # affine f_l — linear ⇒ commutes with the PSF
     r2fit(c,y)=1-sum((surf.(Ref(c),m40c,m70c).-y).^2)/sum((y.-mean(y)).^2)
     sc40=fit_sigma_quad(m40c,[r.s40 for r in calrois]); sc70=fit_sigma_quad(m70c,[r.s70 for r in calrois])
@@ -714,7 +713,7 @@ only for linear/FBP recon, so a clinical DLIR/QIR transfer must re-earn it empir
 """)
 
 # ╔═╡ Cell order:
-# ╟─aaaa0002-0000-4000-8000-000000000002
+# ╠═aaaa0002-0000-4000-8000-000000000002
 # ╟─aaaa0003-0000-4000-8000-000000000003
 # ╠═aaaa0001-0000-4000-8000-000000000001
 # ╠═aaaa0004-0000-4000-8000-000000000004
