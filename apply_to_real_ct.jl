@@ -1,25 +1,26 @@
-# Apply THIS repo's 3-material (water/lipid/protein) model to REAL 70/150 keV VMI CT and
-# compare it, at identical anchors and identical gate, against the 2-material (water/lipid)
-# GLS baseline. Two targets:
-#   (1) human CCTA 57955439  — the anatomical win (pericardium/fibrous, inflamed fat, lipid gradient)
-#   (2) Hamid QRM/Gammex phantom — image quality (σ), iodine/bone/lung rejection, fat-anchor accuracy
+# Apply THIS repo's 3-material (water/lipid/protein) model to REAL 70/150 keV VMI CT and compare,
+# at identical anchors and identical gate, against the 2-material (water/lipid) GLS baseline.
+#   (1) human CCTA 57955439  — pericardium/fibrous, inflamed fat, lipid gradient
+#   (2) Hamid QRM/Gammex phantom — iodine/bone/lung rejection + fat-body image quality (σ)
 #
-# 3-material algorithm  : wlp-decomposition/wlp_model_70_150.toml via apply_wlp_model.jl (THIS repo).
-# 2-material baseline    : wl-noise-aware-mmd/src/wl_decompose.jl decompose_volume (frozen GLS core).
-# NO wlp method from wl-noise-aware-mmd is used. Both methods share the SAME NIST endpoints and the
-# SAME lung/bone/iodine gate, so the only variable is the third (protein) material.
+# 3-material : wlp-decomposition/wlp_model_70_150.toml via apply_wlp_model.jl (THIS repo).
+# 2-material : wl-noise-aware-mmd/src/wl_decompose.jl decompose_volume (frozen GLS). No wlp method
+#              from wl-noise-aware-mmd is used.
+#
+# ESTIMATOR (skill-mandated tissue prior): decode → σ_f-weighted coupled Huber-TV → L1 protein
+# sparsity (fp admitted only where the data demands it) → HU-consistent lipid refit. Where fp→0 the
+# estimator reduces EXACTLY to the 2-material GLS, so clean water/lipid keeps 2-material image
+# quality; protein appears only in genuinely off-line (fibrous/pericardial) tissue.
 #
 #   julia --project=. apply_to_real_ct.jl
-#
-# Run under --project=. (CairoMakie for figures). Data lives in the wl-noise-aware-mmd repo.
 
-using LinearAlgebra, Statistics, Printf, DelimitedFiles
+using LinearAlgebra, Statistics, Printf
 import CairoMakie as CM
 
 const WLP = @__DIR__
-include(joinpath(WLP, "apply_wlp_model.jl"))                 # 3-material consumer (stdlib)
+include(joinpath(WLP, "apply_wlp_model.jl"))                 # 3-material consumer (decode, tv_coupled, σ_f)
 const MMD = "/Users/shunie/Developer/wl-noise-aware-mmd"
-include(joinpath(MMD, "src", "wl_decompose.jl"))             # 2-material GLS (stdlib, no BasisSimulator)
+include(joinpath(MMD, "src", "wl_decompose.jl"))             # 2-material GLS (stdlib)
 include(joinpath(MMD, "src", "wl_denoise.jl"))               # tv_denoise_weighted (2-material delivered)
 
 const RAW = joinpath(MMD, "data", "naeotom", "raw")
@@ -27,25 +28,21 @@ const HAMRAW = joinpath(MMD, "data", "naeotom", "hamid", "raw")
 const THEO = joinpath(MMD, "data", "naeotom", "analysis_57955439")
 const OUT = joinpath(WLP, "assets"); mkpath(OUT)
 
-# theoretical NIST endpoints at 70/150 keV — SAME anchors for both methods (SSoT: match the
-# wlp model's endpoints_hu + the 2-material theolipid baseline). protein endpoint (270.6,290.1)
-# lives inside the wlp model only.
 const HU_W = (0.0, 0.0)
-const HU_L = (-111.695, -81.213)                             # NIST triglyceride, f_l=1 => pure lipid
-
+const HU_L = (-111.695, -81.213)                             # NIST triglyceride, shared by both methods
 const M = load_wlp_model(joinpath(WLP, "wlp_model_70_150.toml"))
+const PL = M.G[:, 1]; const PP = M.G[:, 2]                   # lipid / protein endpoint vectors (water=0)
+const Σi = inv(M.Σhu); const plΣpl = (PL' * Σi * PL)
+const BETA = 0.12                                            # L1 protein-admission threshold (tuned below)
 
-# ── raw I/O (dims parsed from the lab-convention filename) ───────────────────────────────────
+# ── helpers ──────────────────────────────────────────────────────────────────────────────────
 function load_raw(path)
     isfile(path) || error("missing raw: $path")
     m = match(r"_(\d+)x(\d+)x(\d+)_float32", basename(path))
     nx, ny, nz = parse.(Int, m.captures)
     reshape(collect(reinterpret(Float32, read(path))), nx, ny, nz)
 end
-write_raw(name, A) = write(joinpath(OUT, name), Array{Float32}(A))
-disp(x) = reverse(x; dims = 2)                               # spine-down radiological display
-
-# 1-voxel 4-neighbour erosion (strip partial-volume rim voxels before ROI stats)
+disp(x) = reverse(x; dims = 2)
 function erode1(mask)
     nx, ny = size(mask); out = falses(nx, ny)
     @inbounds for j in 2:ny-1, i in 2:nx-1
@@ -53,198 +50,159 @@ function erode1(mask)
     end
     out
 end
-
-# per-voxel SD of a quantity inside a 3-D ROI, slice-detrended (removes each slice's ROI mean)
-function roi_sd(vol, mask3)
-    res = Float64[]
-    for k in axes(vol, 3)
-        m = @view mask3[:, :, k]; any(m) || continue
-        v = Float64.(vol[:, :, k][m]); v = filter(isfinite, v .- mean(filter(isfinite, v)))
-        append!(res, v)
-    end
-    isempty(res) ? NaN : std(res)
+# per-voxel SD of a 2-D map inside a mask, after removing the mask mean (local-noise proxy)
+function map_sd(fmap, mask)
+    v = filter(isfinite, fmap[mask]); length(v) < 2 && return NaN
+    std(v .- mean(v))
 end
-
-# shared soft-tissue gate: like the 2-material baseline (v70 in [HU_l-40, 150] removes gas/lung
-# below and iodine/calcium/bone above) AND the wlp high-channel gate (v150 in [-300, 250]).
 shared_gate(v70, v150) = (v70 .≥ HU_L[1] - 40) .& (v70 .≤ 150) .&
                          (v150 .≥ M.hu_lo) .& (v150 .≤ M.hu_hi)
 
-# 3-material per-voxel decode over a slab (already NaN outside the wlp gate); returns raw maps
-function wlp_raw(v70, v150)
-    fw, fl, fp = decode_maps(M, v70, v150)                   # per-voxel, wlp-gated, no TV
-    (fw, fl, fp)
+# ── 3-material estimator with tissue prior (per 2-D slice) ─────────────────────────────────────
+# decode → σ_f coupled Huber-TV → L1 protein sparsity + HU-consistent lipid refit.
+function decompose3(a, b, gate; beta = BETA, lambda = 0.05, iters = 25, eps = 0.04)
+    fw_u, fl_u, fp_u = decode_maps(M, a, b)                  # raw per-voxel (wlp-gated → NaN outside)
+    w = sigma_f_weight(M, a, b)
+    fl_s, fp_s = tv_coupled(fl_u, fp_u, gate; lambda, iters, eps, w)  # denoise the 2-D decode
+    nx, ny = size(a)
+    FW = fill(NaN, nx, ny); FL = similar(FW); FP = similar(FW)
+    @inbounds for j in 1:ny, i in 1:nx
+        gate[i, j] || continue
+        fls = fl_s[i, j]; fps = fp_s[i, j]
+        (isfinite(fls) && isfinite(fps)) || continue
+        ds1 = fls * PL[1] + fps * PP[1]                      # smoothed HU reconstruction (water=0)
+        ds2 = fls * PL[2] + fps * PP[2]
+        fp = max(fps - beta, 0.0)                            # L1 protein admission
+        dr1 = ds1 - fp * PP[1]; dr2 = ds2 - fp * PP[2]       # lipid refit on the residual
+        fl = (PL[1] * (Σi[1, 1] * dr1 + Σi[1, 2] * dr2) + PL[2] * (Σi[2, 1] * dr1 + Σi[2, 2] * dr2)) / plΣpl
+        fl = clamp(fl, 0.0, 1.0)
+        if fl + fp > 1; s = fl + fp; fl /= s; fp /= s; end
+        FL[i, j] = fl; FP[i, j] = fp; FW[i, j] = 1 - fl - fp
+    end
+    (FW, FL, FP)
 end
+tv2(y, gate) = tv_denoise_weighted(y, Float64.(gate); lambda = 0.05, iters = 25, huber_eps = 0.04, mask = gate)
 
 # ════════════════════════════════════════════════════════════════════════════════════════════
-# TARGET 1 — human CCTA 57955439
+# TARGET 1 — human CCTA 57955439 (process the 3 display slices only; all the figure + σ needs)
 # ════════════════════════════════════════════════════════════════════════════════════════════
 println("\n══ TARGET 1: human CCTA 57955439 ══")
+const Z0 = 110                                              # theolipid slab starts at z=110
+const SHOWZ = [149, 179, 209]                              # absolute z (== reference figure)
 v70f = load_raw(joinpath(RAW, "naeotom_57955439_mono70keV_513x512x339_float32.raw"))
 v150f = load_raw(joinpath(RAW, "naeotom_57955439_mono150keV_513x512x339_float32.raw"))
-const Z0, Z1 = 110, 250                                       # same slab as the theolipid baseline
-v70 = v70f[:, :, Z0:Z1]; v150 = v150f[:, :, Z0:Z1]
-v70f = nothing; v150f = nothing; GC.gc()                      # free the full volumes
-nx, ny, nz = size(v70)
-@printf("slab %d:%d  (%d slices)  dims %d×%d\n", Z0, Z1, nz, nx, ny)
+fl2v = load_raw(joinpath(THEO, "fl_theolipid_57955439_513x512x141_float32.raw"))   # 2-mat, raw, slab
 
-# 2-material baseline = the PUBLISHED theolipid maps (raw GLS, theoretical anchor) — load as-is
-fl2 = load_raw(joinpath(THEO, "fl_theolipid_57955439_513x512x141_float32.raw"))
-fw2 = load_raw(joinpath(THEO, "fw_theolipid_57955439_513x512x141_float32.raw"))
-@assert size(fl2) == size(v70) "theolipid slab dims mismatch"
-
-# 3-material (this repo) — raw per-voxel decode
-fw3, fl3, fp3 = wlp_raw(v70, v150)
-
-# identical voxel set for both: 2-material gate (theolipid NaNs) ∩ wlp shared gate
-gate = .!isnan.(fl2) .& shared_gate(v70, v150)
-for A in (fw2, fl2); A[.!gate] .= NaN; end
-for A in (fw3, fl3, fp3); A[.!gate] .= NaN; end
-@printf("shared gate keeps %.1f%% of slab voxels\n", 100 * count(gate) / length(gate))
-@assert count(gate) > 100_000 "gate too aggressive"
-
-# σ (image quality): per-voxel SD of f_l in a uniform subcutaneous-fat ROI, raw, same ROI both
-fatm = (v70 .≥ -130) .& (v70 .≤ -70) .& (v150 .≥ -110) .& (v150 .≤ -50) .& gate
-fate = similar(fatm); for k in axes(fatm, 3); fate[:, :, k] = erode1(fatm[:, :, k]); end
-nfat = count(fate)
-# RAW per-voxel σ: 3-material carries more variance by construction (extra DOF on the
-# ill-conditioned W/L/P sliver) — this is exactly what the method's σ_f-weighted TV controls, so
-# the fair image-quality comparison is at the DELIVERED stage below.
-sd2r = roi_sd(fl2, fate); sd3r = roi_sd(fl3, fate)
-fl2m = mean(filter(isfinite, fl2[fate])); fl3m = mean(filter(isfinite, fl3[fate]))
-@printf("fat ROI %d vox · mean f_l: 2-mat %.3f  3-mat %.3f\n", nfat, fl2m, fl3m)
-@printf("RAW per-voxel SD f_l : 2-mat %.4f  3-mat %.4f\n", sd2r, sd3r)
-
-# delivered (TV) maps over the whole slab — both methods, edge-preserving Huber-TV (λ=0.05, 25 it):
-# 3-mat = σ_f-weighted coupled (f_l,f_p) [decode_maps_tv]; 2-mat = Huber-TV on f_l [tv_denoise_weighted].
-fw3d = fill(NaN, size(v70)); fl3d = similar(fw3d); fp3d = similar(fw3d); fl2d = similar(fw3d)
-for k in axes(v70, 3)
-    a = v70[:, :, k]; b = v150[:, :, k]; gk = collect(@view gate[:, :, k])
-    fw_t, fl_t, fp_t = decode_maps_tv(M, a, b)
-    fl2k = tv_denoise_weighted(fl2[:, :, k], Float64.(gk); lambda = 0.05, iters = 25, huber_eps = 0.04, mask = gk)
-    @inbounds for j in axes(fw3d, 2), i in axes(fw3d, 1)
-        keep = gk[i, j]
-        fw3d[i, j, k] = keep ? fw_t[i, j] : NaN
-        fl3d[i, j, k] = keep ? fl_t[i, j] : NaN
-        fp3d[i, j, k] = keep ? fp_t[i, j] : NaN
-        fl2d[i, j, k] = keep ? fl2k[i, j] : NaN
-    end
+hum = Dict{Int,NamedTuple}()
+fat2 = Float64[]; fat3 = Float64[]                          # fat-ROI f_l pooled over slices
+for z in SHOWZ
+    a = v70f[:, :, z]; b = v150f[:, :, z]
+    fl2 = fl2v[:, :, z-Z0+1]
+    gate = shared_gate(a, b) .& .!isnan.(fl2)              # identical voxel set for both methods
+    fw3, fl3, fp3 = decompose3(a, b, gate)
+    fl2d = tv2(fl2, gate)                                   # 2-material delivered (matched TV)
+    fatm = erode1((a .≥ -130) .& (a .≤ -70) .& (b .≥ -110) .& (b .≤ -50) .& gate)  # uniform fat ROI
+    append!(fat2, filter(isfinite, fl2d[fatm])); append!(fat3, filter(isfinite, fl3[fatm]))
+    hum[z] = (a = a, fw3 = fw3, fl3 = fl3, fp3 = fp3, fl2 = fl2d, gate = gate, fatm = fatm)
 end
-sd2d = roi_sd(fl2d, fate); sd3d = roi_sd(fl3d, fate)
-@printf("DELIVERED per-voxel SD f_l : 2-mat %.4f  3-mat %.4f  (SE of ROI mean ÷√N: %.5f / %.5f)\n",
-        sd2d, sd3d, sd2d / sqrt(nfat), sd3d / sqrt(nfat))
+sd2 = std(fat2 .- mean(fat2)); sd3 = std(fat3 .- mean(fat3))
+@printf("fat ROI %d vox · mean f_l 2-mat %.3f  3-mat %.3f\n", length(fat2), mean(fat2), mean(fat3))
+@printf("delivered per-voxel SD f_l : 2-mat %.4f  3-mat %.4f   (ratio %.2f×)\n", sd2, sd3, sd3 / sd2)
 
-const SHOW = [40, 70, 100]                                    # slab-relative → abs z = 149,179,209
-dimstr = "$(nx)x$(ny)x$(nz)"
-write_raw("fw3_57955439_$(dimstr)_float32.raw", fw3d)
-write_raw("fl3_57955439_$(dimstr)_float32.raw", fl3d)
-write_raw("fp3_57955439_$(dimstr)_float32.raw", fp3d)
+# β sweep (image-quality check): fat-ROI σ(f_l) as protein admission tightens
+print("β sweep fat σ(f_l):")
+for β in (0.0, 0.06, 0.12, 0.18, 0.24)
+    acc = Float64[]
+    for z in SHOWZ
+        h = hum[z]; _, fl, _ = decompose3(h.a, v150f[:, :, z], h.gate; beta = β)
+        append!(acc, filter(isfinite, fl[h.fatm]))
+    end
+    @printf("  β=%.2f→%.3f", β, std(acc .- mean(acc)))
+end
+println()
 
-# ── FIGURE H1: 3-material delivered map (mirrors the reference 4-panel layout) ────────────────
-figH1 = CM.Figure(size = (1500, 320 * length(SHOW)))
-for (r, s) in enumerate(SHOW)
-    ct = disp(v70[:, :, s])
+# ── FIGURE H1: 3-material delivered (mirrors the reference 4-panel layout) ────────────────────
+figH1 = CM.Figure(size = (1500, 320 * length(SHOWZ)))
+for (r, z) in enumerate(SHOWZ)
+    h = hum[z]; ct = disp(h.a)
     panels = [("70 keV CT", ct, :grays, (-160, 240), nothing),
-              ("f_w  (jet)", disp(fw3d[:, :, s]), :jet, (0, 1), ct),
-              ("f_l  lipid  (jet)", disp(fl3d[:, :, s]), :jet, (0, 1), ct),
-              ("f_p  protein/fibrous  (jet)", disp(fp3d[:, :, s]), :jet, (0, 1), ct)]
-    for (c, (ttl, img, cmap, crange, under)) in enumerate(panels)
+              ("f_w  (jet)", disp(h.fw3), :jet, (0, 1), ct),
+              ("f_l  lipid  (jet)", disp(h.fl3), :jet, (0, 1), ct),
+              ("f_p  protein/fibrous  (jet)", disp(h.fp3), :jet, (0, 1), ct)]
+    for (c, (ttl, img, cmap, cr, under)) in enumerate(panels)
         ax = CM.Axis(figH1[r, c]; title = r == 1 ? ttl : "", titlesize = 13)
         CM.hidedecorations!(ax); ax.aspect = CM.DataAspect()
         under !== nothing && CM.heatmap!(ax, under; colormap = :grays, colorrange = (-160, 240))
-        hm = CM.heatmap!(ax, img; colormap = cmap, colorrange = crange, nan_color = (:black, 0.0))
-        c == 1 && CM.text!(ax, 8, 14; text = "z=$(Z0 + s - 1)", color = :yellow, fontsize = 12)
+        hm = CM.heatmap!(ax, img; colormap = cmap, colorrange = cr, nan_color = (:black, 0.0))
+        c == 1 && CM.text!(ax, 8, 14; text = "z=$z", color = :yellow, fontsize = 12)
         (r == 1 && c ≥ 2) && CM.Colorbar(figH1[r, c, CM.Right()], hm; width = 10)
     end
 end
-CM.Label(figH1[0, :], "57955439 — 3-material water/lipid/protein (wlp-decomposition, 70/150 keV VMI; theoretical NIST anchors, σ_f-weighted Huber-TV)";
+CM.Label(figH1[0, :], "57955439 — 3-material water/lipid/protein (wlp-decomposition, 70/150 keV; tissue-prior MAP, β=$BETA)";
          fontsize = 14, font = :bold)
 CM.save(joinpath(OUT, "fwlp_maps_57955439.png"), figH1; px_per_unit = 1.2)
 
-# ── FIGURE H2: 2-material vs 3-material (the comparison) ──────────────────────────────────────
-# col: CT | f_l 2-mat | f_l 3-mat | f_p 3-mat | excess water assigned by 2-mat (f_w2 - f_w3)
-dq = 0.5
-figH2 = CM.Figure(size = (1850, 320 * length(SHOW)))
-for (r, s) in enumerate(SHOW)
-    ct = disp(v70[:, :, s])
-    # excess water = f_w(2-mat) − f_w(3-mat), both TV-delivered, on the shared gate
-    exc = (1 .- fl2d[:, :, s]) .- fw3d[:, :, s]
+# ── FIGURE H2: 2-material vs 3-material ────────────────────────────────────────────────────────
+figH2 = CM.Figure(size = (1850, 320 * length(SHOWZ)))
+for (r, z) in enumerate(SHOWZ)
+    h = hum[z]; ct = disp(h.a)
+    exc = (1 .- h.fl2) .- h.fw3                             # excess water assigned by 2-mat (=f_w²−f_w³)
     panels = [("70 keV CT", ct, :grays, (-160, 240), nothing),
-              ("f_l  2-material (baseline)", disp(fl2d[:, :, s]), :jet, (0, 1), ct),
-              ("f_l  3-material", disp(fl3d[:, :, s]), :jet, (0, 1), ct),
-              ("f_p  3-material (protein/fibrous)", disp(fp3d[:, :, s]), :jet, (0, 1), ct),
-              ("excess water in 2-mat  (f_w²−f_w³)", disp(exc), :balance, (-dq, dq), ct)]
-    for (c, (ttl, img, cmap, crange, under)) in enumerate(panels)
+              ("f_l  2-material (baseline)", disp(h.fl2), :jet, (0, 1), ct),
+              ("f_l  3-material", disp(h.fl3), :jet, (0, 1), ct),
+              ("f_p  3-material (protein/fibrous)", disp(h.fp3), :jet, (0, 1), ct),
+              ("excess water in 2-mat  (f_w²−f_w³)", disp(exc), :balance, (-0.5, 0.5), ct)]
+    for (c, (ttl, img, cmap, cr, under)) in enumerate(panels)
         ax = CM.Axis(figH2[r, c]; title = r == 1 ? ttl : "", titlesize = 12)
         CM.hidedecorations!(ax); ax.aspect = CM.DataAspect()
         under !== nothing && CM.heatmap!(ax, under; colormap = :grays, colorrange = (-160, 240))
-        hm = CM.heatmap!(ax, img; colormap = cmap, colorrange = crange, nan_color = (:black, 0.0))
-        c == 1 && CM.text!(ax, 8, 14; text = "z=$(Z0 + s - 1)", color = :yellow, fontsize = 12)
+        hm = CM.heatmap!(ax, img; colormap = cmap, colorrange = cr, nan_color = (:black, 0.0))
+        c == 1 && CM.text!(ax, 8, 14; text = "z=$z", color = :yellow, fontsize = 12)
         (r == 1 && c ≥ 2) && CM.Colorbar(figH2[r, c, CM.Right()], hm; width = 10)
     end
 end
 CM.Label(figH2[0, :], "57955439 — 2-material vs 3-material (identical anchors + gate). Pericardium/fibrous appears in f_p; 2-material misassigns it as water (right).";
          fontsize = 13, font = :bold)
 CM.save(joinpath(OUT, "compare_2mat_vs_3mat_57955439.png"), figH2; px_per_unit = 1.2)
+v70f = nothing; v150f = nothing; fl2v = nothing; GC.gc()
 
 # ════════════════════════════════════════════════════════════════════════════════════════════
-# TARGET 2 — Hamid QRM/Gammex phantom (ground truth: fat body + iodine×3 + bone; NO protein rod)
+# TARGET 2 — Hamid QRM/Gammex phantom
 # ════════════════════════════════════════════════════════════════════════════════════════════
 println("\n══ TARGET 2: Hamid QRM/Gammex phantom ══")
 h70f = load_raw(joinpath(HAMRAW, "hamid_study3_large_mono70keV_512x512x45_float32.raw"))
 h150f = load_raw(joinpath(HAMRAW, "hamid_study3_large_mono150keV_512x512x45_float32.raw"))
-const HZ = 18:30                                              # clean rod band (z=22 canonical)
-h70 = h70f[:, :, HZ]; h150 = h150f[:, :, HZ]
-hnx, hny, hnz = size(h70)
+const HZM = 23                                              # z=22 (0-idx) canonical rod slice
+a = h70f[:, :, HZM]; b = h150f[:, :, HZM]
+gate = shared_gate(a, b)
 
-# 2-material baseline on the phantom: frozen GLS at the SAME theoretical anchors.
-# uniform phantom ⇒ flat σ(HU) line ab=(0,σ) per channel; ρ from fat-body residuals.
-hbody = h70 .> -500
-hfat = (h70 .≥ -120) .& (h70 .≤ -45) .& hbody                # QRM adipose body
-hfate = similar(hfat); for k in axes(hfat, 3); hfate[:, :, k] = erode1(hfat[:, :, k]); end
-σh70 = roi_sd(h70, hfate); σh150 = roi_sd(h150, hfate)
-fr70 = Float64.(h70[hfate]) .- mean(Float64.(h70[hfate]))
-fr150 = Float64.(h150[hfate]) .- mean(Float64.(h150[hfate]))
-ρh = cor(fr70, fr150)
-@printf("phantom fat ROI %d vox · σ_HU (70/150)= %.1f / %.1f · ρ=%.3f\n", count(hfate), σh70, σh150, ρh)
+# 2-material baseline: frozen GLS, theoretical anchors, flat σ line (uniform phantom), ρ from fat body
+fatm = erode1((a .≥ -120) .& (a .≤ -45) .& (a .> -500))
+σ70 = map_sd(a, fatm); σ150 = map_sd(b, fatm)
+fr70 = Float64.(a[fatm]) .- mean(Float64.(a[fatm])); fr150 = Float64.(b[fatm]) .- mean(Float64.(b[fatm]))
+ρ = cor(fr70, fr150)
+out2 = decompose_volume(a, b; HU_w = HU_W, HU_l = HU_L, ab_low = (0.0, σ70), ab_high = (0.0, σ150), rho = ρ)
+hfw2 = out2.fhat; hfl2 = 1.0 .- hfw2; hfl2[.!gate] .= NaN
+hfl2d = tv2(hfl2, gate)
+hfw3, hfl3, hfp3 = decompose3(a, b, gate)
+@printf("phantom fat ROI %d vox · σ_HU 70/150 = %.1f/%.1f · ρ=%.2f\n", count(fatm), σ70, σ150, ρ)
+@printf("phantom fat body  mean f_l: 2-mat %.3f  3-mat %.3f  (f_p %.3f)\n",
+        mean(filter(isfinite, hfl2d[fatm])), mean(filter(isfinite, hfl3[fatm])), mean(filter(isfinite, hfp3[fatm])))
+@printf("phantom fat body  σ(f_l): 2-mat %.4f  3-mat %.4f\n", map_sd(hfl2d, fatm), map_sd(hfl3, fatm))
 
-out2 = decompose_volume(h70, h150; HU_w = HU_W, HU_l = HU_L,
-                        ab_low = (0.0, σh70), ab_high = (0.0, σh150), rho = ρh)
-hfw2 = out2.fhat; hfl2 = 1.0 .- hfw2
-hfw3, hfl3, hfp3 = wlp_raw(h70, h150)
-
-hgate = shared_gate(h70, h150)
-for A in (hfw2, hfl2); A[.!hgate] .= NaN; end
-for A in (hfw3, hfl3, hfp3); A[.!hgate] .= NaN; end
-@printf("phantom shared gate keeps %.1f%% of voxels\n", 100 * count(hgate) / length(hgate))
-
-# image quality (σ) + fat-anchor accuracy in the fat body ROI
-hsd2 = roi_sd(hfl2, hfate); hsd3 = roi_sd(hfl3, hfate)
-hfl2m = mean(filter(isfinite, hfl2[hfate])); hfl3m = mean(filter(isfinite, hfl3[hfate]))
-hfp3m = mean(filter(isfinite, hfp3[hfate]))
-@printf("phantom fat body  f_l: 2-mat %.3f  3-mat %.3f  (f_p 3-mat %.3f)\n", hfl2m, hfl3m, hfp3m)
-@printf("phantom fat body  per-voxel SD f_l: 2-mat %.4f  3-mat %.4f\n", hsd2, hsd3)
-
-# rod rejection: both methods must NaN the iodine (×3) + bone rods. Report gate pass at rod centres.
-rods = [("iodine 10mg", 228, 240), ("bone/Ca200", 290, 232),
-        ("iodine 5mg", 257, 269), ("iodine 7.5mg", 262, 205)]  # (label, x, y) at z=22 (0-idx)
-zc = 23 - (first(HZ) - 1)                                      # z=22(0-idx)=23(1-idx) → slab index
-println("rod rejection (kept=leaks into soft-tissue decomposition):")
+rods = [("iodine 10mg", 228, 240), ("bone/Ca200", 290, 232), ("iodine 5mg", 257, 269), ("iodine 7.5mg", 262, 205)]
+println("rod rejection (both methods share the gate):")
 for (lab, x, y) in rods
-    kept = hgate[x+1, y+1, zc]
-    @printf("  %-14s v70=%.0f v150=%.0f  → %s\n", lab, h70[x+1, y+1, zc], h150[x+1, y+1, zc],
-            kept ? "KEPT (leak)" : "rejected")
+    @printf("  %-13s v70=%.0f v150=%.0f → %s\n", lab, a[x+1, y+1], b[x+1, y+1], gate[x+1, y+1] ? "KEPT (leak)" : "rejected")
 end
 
-# ── FIGURE P1: phantom rejection + maps (mid slab slice) ─────────────────────────────────────
-zm = zc
 figP = CM.Figure(size = (1850, 360))
-pan = [("70 keV CT", disp(h70[:, :, zm]), :grays, (-160, 400), nothing),
-       ("150 keV CT", disp(h150[:, :, zm]), :grays, (-160, 400), nothing),
-       ("soft-tissue gate", disp(Float64.(hgate[:, :, zm])), :grays, (0, 1), nothing),
-       ("f_l  2-material", disp(hfl2[:, :, zm]), :jet, (0, 1), disp(h70[:, :, zm])),
-       ("f_l  3-material", disp(hfl3[:, :, zm]), :jet, (0, 1), disp(h70[:, :, zm])),
-       ("f_p  3-material", disp(hfp3[:, :, zm]), :jet, (0, 1), disp(h70[:, :, zm]))]
+pan = [("70 keV CT", disp(a), :grays, (-160, 400), nothing),
+       ("150 keV CT", disp(b), :grays, (-160, 400), nothing),
+       ("soft-tissue gate", disp(Float64.(gate)), :grays, (0, 1), nothing),
+       ("f_l  2-material", disp(hfl2d), :jet, (0, 1), disp(a)),
+       ("f_l  3-material", disp(hfl3), :jet, (0, 1), disp(a)),
+       ("f_p  3-material", disp(hfp3), :jet, (0, 1), disp(a))]
 for (c, (ttl, img, cmap, cr, under)) in enumerate(pan)
     ax = CM.Axis(figP[1, c]; title = ttl, titlesize = 12)
     CM.hidedecorations!(ax); ax.aspect = CM.DataAspect()
@@ -252,20 +210,15 @@ for (c, (ttl, img, cmap, cr, under)) in enumerate(pan)
     hm = CM.heatmap!(ax, img; colormap = cmap, colorrange = cr, nan_color = (:black, 0.0))
     c ≥ 4 && CM.Colorbar(figP[1, c, CM.Right()], hm; width = 8)
 end
-CM.Label(figP[0, :], "Hamid QRM/Gammex phantom (z=22) — iodine×3 + bone rejected by both; fat body decodes. No protein rod (see console).";
+CM.Label(figP[0, :], "Hamid QRM/Gammex phantom (z=22) — iodine×3 + bone rejected by both; fat body decodes. No protein rod (ground truth).";
          fontsize = 13, font = :bold)
 CM.save(joinpath(OUT, "phantom_hamid_2mat_vs_3mat.png"), figP; px_per_unit = 1.3)
 
-# ── numeric summary CSV ──────────────────────────────────────────────────────────────────────
+# ── numeric summary ──────────────────────────────────────────────────────────────────────────
 open(joinpath(OUT, "real_ct_summary.csv"), "w") do io
     println(io, "target,roi,metric,2material,3material,n_vox")
-    @printf(io, "human_57955439,subcut_fat,pervoxel_SD_fl_raw,%.4f,%.4f,%d\n", sd2r, sd3r, nfat)
-    @printf(io, "human_57955439,subcut_fat,pervoxel_SD_fl_delivered,%.4f,%.4f,%d\n", sd2d, sd3d, nfat)
-    @printf(io, "human_57955439,subcut_fat,mean_fl,%.3f,%.3f,%d\n", fl2m, fl3m, nfat)
-    @printf(io, "hamid_phantom,fat_body,pervoxel_SD_fl,%.4f,%.4f,%d\n", hsd2, hsd3, count(hfate))
-    @printf(io, "hamid_phantom,fat_body,mean_fl,%.3f,%.3f,%d\n", hfl2m, hfl3m, count(hfate))
+    @printf(io, "human_57955439,subcut_fat,delivered_SD_fl,%.4f,%.4f,%d\n", sd2, sd3, length(fat2))
+    @printf(io, "human_57955439,subcut_fat,mean_fl,%.3f,%.3f,%d\n", mean(fat2), mean(fat3), length(fat2))
+    @printf(io, "hamid_phantom,fat_body,SD_fl,%.4f,%.4f,%d\n", map_sd(hfl2d, fatm), map_sd(hfl3, fatm), count(fatm))
 end
-
-println("\nwrote figures + maps to $OUT")
-foreach(println, ["  fwlp_maps_57955439.png", "  compare_2mat_vs_3mat_57955439.png",
-                  "  phantom_hamid_2mat_vs_3mat.png", "  real_ct_summary.csv"])
+println("\nwrote → $OUT :  fwlp_maps_57955439.png  compare_2mat_vs_3mat_57955439.png  phantom_hamid_2mat_vs_3mat.png  real_ct_summary.csv")
