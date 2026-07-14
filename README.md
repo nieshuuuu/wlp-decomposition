@@ -43,6 +43,8 @@ simulates (~6 min) and caches to `wlp_sim_cache.jls`; delete that file to re-sim
 
 ## Data
 
-The phantom is **generated in code** (no mask file). The only data file is
-`data/adipose_composition_distribution.csv` — Woodard & White 1986 adipose composition, used solely to fit
-the material prior. Derived from copyrighted figures — private use.
+The phantom is **generated in code** (no mask file), and there are **no input data files** — the
+notebook is standalone. The Woodard & White 1986 adipose composition table (59 points, 7 studies),
+used solely to fit the material prior, is inlined as the `ADIPOSE_CSV` constant in the notebook's
+composition-generation cell and plotted there as `assets/fig1_adipose_composition.png`. Derived from
+copyrighted figures — private use.

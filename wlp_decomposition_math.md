@@ -248,7 +248,7 @@ Calibration and test compositions come from **disjoint random streams** (differe
 surface is never fit and tested on the same mixture. Two generators:
 
 **Physiological (`draw_wlp`)** — a smoothed-bootstrap KDE over the 59-point Woodard-1986 adipose
-table (`data/adipose_composition_distribution.csv`), keeping rows with lipid ≥ 50 % in states
+table (inlined in the notebook as `ADIPOSE_CSV`), keeping rows with lipid ≥ 50 % in states
 {healthy, obese, reduced, comparison, unspecified}. Let $L$ be the kept lipid mass-percents and
 $(s_l, s_p)$ the lipid/protein split of the "protein" rows. For each draw:
 

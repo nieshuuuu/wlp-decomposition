@@ -842,6 +842,27 @@ local background must be a field (not a constant) because PVAT muscle isn't unif
 only for linear/FBP recon, so a clinical DLIR/QIR transfer must re-earn it empirically.
 """)
 
+# ╔═╡ aaaa0029-0000-4000-8000-000000000029
+# Woodard & White 1986 Fig. 1, reproduced from the inlined ADIPOSE_CSV — this is the data
+# `draw_wlp` fits its prior to, plotted so the table is visible without an external file.
+# Colour = component, marker = provenance (● tabulated value, ✚ digitized from the figure).
+let f=CM.Figure(size=(900,480))
+    raw=readdlm(IOBuffer(ADIPOSE_CSV),','; header=false); hdr=string.(raw[1,:]); rows=raw[2:end,:]
+    ci(x)=findfirst(==(x),hdr); cc,cl,cp,cv=ci("component"),ci("lipid_pct"),ci("component_pct"),ci("provenance")
+    CWv=CM.RGBf(0.231,0.459,0.690); CPv=CM.RGBf(0.757,0.267,0.235); CAv=CM.RGBf(0.50,0.50,0.50)
+    ax=CM.Axis(f[1,1];xlabel="lipid (mass %)",ylabel="component (mass %)",limits=(40,92,-2,56))
+    CM.vlines!(ax,50;color=:gray,linestyle=:dash)
+    CM.text!(ax,50.8,55;text="→ draw_wlp keeps lipid ≥ 50 %",color=:gray,fontsize=10,align=(:left,:top))
+    for (comp,col) in (("water",CWv),("protein",CPv),("ash",CAv)), (prov,mk) in (("paper",:circle),("figure",:cross))
+        s=[i for i in axes(rows,1) if string(rows[i,cc])==comp && string(rows[i,cv])==prov]
+        isempty(s) && continue
+        CM.scatter!(ax,[Float64(rows[i,cl]) for i in s],[Float64(rows[i,cp]) for i in s];color=col,marker=mk,markersize=10,label="$comp ($prov)")
+    end
+    CM.axislegend(ax;position=:rt,framevisible=false,labelsize=9)
+    CM.Label(f[0,:],"Adipose composition vs lipid fraction — Woodard & White 1986 Fig. 1 · $(size(rows,1)) points, 7 studies · ● tabulated  ✚ digitized";fontsize=12,font=:bold)
+    safe_save(joinpath(ASSET,"fig1_adipose_composition.png"),f); f
+end
+
 # ╔═╡ Cell order:
 # ╟─aaaa0002-0000-4000-8000-000000000002
 # ╟─aaaa0003-0000-4000-8000-000000000003
@@ -850,7 +871,8 @@ only for linear/FBP recon, so a clinical DLIR/QIR transfer must re-earn it empir
 # ╟─aaaa0005-0000-4000-8000-000000000005
 # ╠═aaaa0006-0000-4000-8000-000000000006
 # ╟─aaaa0007-0000-4000-8000-000000000007
-# ╠═aaaa0008-0000-4000-8000-000000000008
+# ╟─aaaa0008-0000-4000-8000-000000000008
+# ╠═aaaa0029-0000-4000-8000-000000000029
 # ╟─aaaa0009-0000-4000-8000-000000000009
 # ╠═aaaa0010-0000-4000-8000-000000000010
 # ╟─aaaa0011-0000-4000-8000-000000000011
@@ -871,3 +893,4 @@ only for linear/FBP recon, so a clinical DLIR/QIR transfer must re-earn it empir
 # ╠═aaaa0023-0000-4000-8000-000000000023
 # ╠═aaaa0024-0000-4000-8000-000000000024
 # ╟─aaaa0025-0000-4000-8000-000000000025
+# ╠═aaaa0029-0000-4000-8000-000000000029
