@@ -35,7 +35,7 @@ Woodard adipose CSV for the prior): mix materials by volume fraction, simulate 8
 **70 and 150 keV** (the `WLP_PAIR` knob; 150 keV is a clinically standard VMI), and invert.
 
 **Two complementary products.**
-1. A **quadratic calibration surface** ``f=\\mathrm{poly}_2(\\mathrm{HU}_{40},\\mathrm{HU}_{70})`` for per-voxel
+1. A **quadratic calibration surface** ``f=\mathrm{poly}_2(\mathrm{HU}_{40},\mathrm{HU}_{70})`` for per-voxel
    point accuracy, delivered as a **boundary-agnostic** map (per-voxel decode + σ_f-weighted edge-preserving
    Huber-TV — never the ground-truth boundary, which real fat doesn't give you).
 2. An **integrated-HU** (mass-conservation) estimator for the PVE-robust *total* lipid: a normalized recon PSF
@@ -713,7 +713,7 @@ only for linear/FBP recon, so a clinical DLIR/QIR transfer must re-earn it empir
 """)
 
 # ╔═╡ Cell order:
-# ╠═aaaa0002-0000-4000-8000-000000000002
+# ╟─aaaa0002-0000-4000-8000-000000000002
 # ╟─aaaa0003-0000-4000-8000-000000000003
 # ╠═aaaa0001-0000-4000-8000-000000000001
 # ╠═aaaa0004-0000-4000-8000-000000000004
