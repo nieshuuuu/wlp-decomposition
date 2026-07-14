@@ -558,31 +558,51 @@ end
 # mm (not pixels) so the geometry is readable directly; yreversed ⇒ spine down = standard CT view.
 # Left: 13 hex-packed circular inserts (calibration + circular test). Right: 16 sector wedges, the
 # held-out test geometry. Insert numbers k index `mcomps[k]` / `scomps[k]` — label = ROD0-1+k.
+#
+# Insert colour is a deliberately neutral "mixture slot", NOT a tissue colour: the inserts are
+# `diverse_comps` spanning the whole W/L/P triangle (f_w 0.02–0.83 here — over half are water-
+# dominant), so they are not adipose and no tissue colour would be honest. Amber/blue/red are
+# reserved for the lipid/water/protein endpoints in fig_decode_triangle_noise. The label map is
+# also shared across scans while each scan redraws its own comps, so colour cannot encode
+# composition here — see the delivered map (fig3/fig7) for that.
 let f=CM.Figure(size=(1320,600))
     x_mm(i)=185.0+(-RECON_FOV_MM/2+RECON_PX_MM/2+(i-1)*RECON_PX_MM)   # recon px → phantom mm (auto-centred on isocentre)
     y_mm(j)=135.0+(-RECON_FOV_MM/2+RECON_PX_MM/2+(j-1)*RECON_PX_MM)
     TIS=(0x00=>("air",CM.RGBf(1.00,1.00,1.00)), 0x01=>("lung",CM.RGBf(0.78,0.86,0.93)),
          0x02=>("muscle",CM.RGBf(0.75,0.44,0.42)), 0x03=>("cortical bone",CM.RGBf(0.93,0.91,0.83)),
          0x04=>("red marrow",CM.RGBf(0.85,0.55,0.58)), 0x05=>("adipose (fat ring)",CM.RGBf(0.97,0.83,0.46)))
-    INS=CM.RGBf(0.231,0.459,0.690); cmap=Dict(k=>c for (k,(_,c)) in TIS)
+    INS=CM.RGBf(0.42,0.38,0.60); cmap=Dict(k=>c for (k,(_,c)) in TIS)
     colorize(m)=[get(cmap,l,INS) for l in m]                          # anything ≥ ROD0 is a WLP insert
     xr=(185.0-RECON_FOV_MM/2,185.0+RECON_FOV_MM/2); yr=(135.0-RECON_FOV_MM/2,135.0+RECON_FOV_MM/2)  # image! wants outer edges
     θ=range(0,2π,200)
-    for (col,(m,cmps,ttl)) in enumerate(((map_m2,mcomps,"circular — $(length(mcomps)) hex-packed inserts, ø$(round(2*INS_R,digits=1)) mm"),
-                                         (smap_m2,scomps,"sector — $(length(scomps)) wedges, r ≤ $(Int(SECT_R_MM)) mm (held-out)")))
+    # Circular inserts are compact ⇒ centroid is fine. Sector wedges are annular, so their centroid
+    # drifts inward and the inner ring collides at the hub: place those on the wedge bisector at a
+    # fixed fraction of the ring, derived from the same constants that build them.
+    cpos(k)=(t=label_centroid(map_m2,UInt8(ROD0-1+k)); (x_mm(t[1]),y_mm(t[2])))
+    spos(k)=(a=((k-1)%SECT_NANG+0.5)*(2π/SECT_NANG); r=(SECT_R_MM/SECT_NRAD)*((k-1)÷SECT_NANG+0.55); (HC_X+r*cos(a),HC_Y+r*sin(a)))
+    for (col,(m,cmps,pos,ttl)) in enumerate(((map_m2,mcomps,cpos,"circular — $(length(mcomps)) hex-packed inserts, ø$(round(2*INS_R,digits=1)) mm"),
+                                             (smap_m2,scomps,spos,"sector — $(length(scomps)) wedges, r ≤ $(Int(SECT_R_MM)) mm (held-out)")))
         ax=CM.Axis(f[1,col];aspect=CM.DataAspect(),yreversed=true,xlabel="x (mm)",ylabel=col==1 ? "y (mm)" : "",title=ttl,titlesize=11)
         CM.image!(ax,xr,yr,colorize(m))
         CM.lines!(ax,HC_X.+HEART_R_MM.*cos.(θ),HC_Y.+HEART_R_MM.*sin.(θ);color=:black,linestyle=:dash,linewidth=1.1)
         CM.text!(ax,HC_X+HEART_R_MM+6,HC_Y;text="heart cavity\nr = $(Int(HEART_R_MM)) mm",fontsize=9,align=(:left,:center))
+        if col==2                       # wedges share one colour ⇒ draw the lattice or it reads as a solid disc
+            for a in 0:SECT_NANG-1
+                φ=a*(2π/SECT_NANG); CM.lines!(ax,[HC_X,HC_X+SECT_R_MM*cos(φ)],[HC_Y,HC_Y+SECT_R_MM*sin(φ)];color=(:white,0.8),linewidth=0.8)
+            end
+            for ri in 1:SECT_NRAD-1
+                rr=ri*(SECT_R_MM/SECT_NRAD); CM.lines!(ax,HC_X.+rr.*cos.(θ),HC_Y.+rr.*sin.(θ);color=(:white,0.8),linewidth=0.8)
+            end
+        end
         for k in 1:length(cmps)
-            ci,cj=label_centroid(m,UInt8(ROD0-1+k)); isnan(ci) && continue
-            CM.text!(ax,x_mm(ci),y_mm(cj);text=string(k),color=:white,fontsize=9,font=:bold,align=(:center,:center))
+            px,py=pos(k); isnan(px) && continue
+            CM.text!(ax,px,py;text=string(k),color=:white,fontsize=9,font=:bold,align=(:center,:center))
         end
     end
     swatch(c)=CM.PolyElement(color=c,strokecolor=CM.RGBf(0.6,0.6,0.6),strokewidth=0.5)   # stroke: air is white-on-white
     els=CM.PolyElement[]; lbls=String[]
     for (k,(n,c)) in TIS; push!(els,swatch(c)); push!(lbls,"$(Int(k)) · $n"); end
-    push!(els,swatch(INS)); push!(lbls,"$(ROD0)+ · WLP inserts")
+    push!(els,swatch(INS)); push!(lbls,"$(ROD0)+ · W/L/P mixture\n        slots (per-scan comps)")
     CM.Legend(f[1,3],els,lbls,"label → material";framevisible=false,labelsize=10,titlesize=10)
     CM.Label(f[0,:],"QRM-thorax phantom label map — 512² recon grid, mid-slice, phantom-frame mm · posterior down · numbers index mcomps/scomps";fontsize=12,font=:bold)
     safe_save(joinpath(ASSET,"fig_phantom_labels.png"),f); f
