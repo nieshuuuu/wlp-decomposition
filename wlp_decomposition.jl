@@ -464,10 +464,10 @@ begin
 end
 
 # ╔═╡ aaaa0026-0000-4000-8000-000000000026
-# Portable model export — this notebook is the SINGLE producer of wlp_model_<pair>.toml;
-# apply_wlp_model.jl (stdlib-only) consumes it on arbitrary co-registered VMI pairs.
-# The cal table (ROI means/stds + true fractions) is included so a new chain can refit
-# the same recipe; per-voxel data stays in the .jls caches.
+# Portable model snapshot — dumps the fitted surface + noise + gate + calibration table to
+# wlp_model_<pair>.toml (stdlib TOML, no BasisSimulator), so the model can be applied outside
+# this notebook. In-notebook, the `wlp_apply` cell below consumes the same coefficients live.
+# The cal table (ROI means/stds + true fractions) lets a new chain refit the same recipe.
 begin
     import TOML
     const MODEL_TOML = joinpath(@__DIR__, "wlp_model_$(PTAG).toml")
@@ -490,7 +490,7 @@ begin
                 "n_vox"=>[length(r.v40) for r in calrois]),
         ))
     end
-    Markdown.parse("**Model exported** → `$(basename(MODEL_TOML))` (poly2 surface + noise + gate + calibration table; consumer: `apply_wlp_model.jl`).")
+    Markdown.parse("**Model snapshot** → `$(basename(MODEL_TOML))` (poly2 surface + noise + gate + calibration table; applied live by the `wlp_apply` cell below).")
 end
 
 # ╔═╡ aaaa0015-0000-4000-8000-000000000015
@@ -706,6 +706,74 @@ local background must be a field (not a constant) because PVAT muscle isn't unif
 only for linear/FBP recon, so a clinical DLIR/QIR transfer must re-earn it empirically.
 """)
 
+# ╔═╡ aaaa0027-0000-4000-8000-000000000027
+# One-click product: apply the fitted model to ANY co-registered VMI pair from the same 70/150-keV
+# chain → (f_w, f_l, f_p) maps. No external file, no re-fit — the model IS the live fitted globals
+# (cw,cl,cp,cl_aff, sc40,sc70, ρ, the soft-tissue gate); this reuses the delivered-map pipeline
+# (fullfield · sigma_f_weight · tv_coupled) verbatim, so the product and the validation share one method.
+begin
+    # tv=true → boundary-agnostic delivered map (2D slice); tv=false → raw per-voxel decode (any dim).
+    function wlp_apply(vmi_low, vmi_high; tv=true)
+        fw, fl, fp = fullfield(vmi_low, vmi_high)
+        tv || return (fw, fl, fp)
+        gate = .!isnan.(fl); w = sigma_f_weight(vmi_low, vmi_high)
+        fl_tv, fp_tv = tv_coupled(fl, fp, gate; lambda=0.05, iters=25, eps=0.04, w=w)
+        fw_tv = map((a, b) -> isnan(a) ? NaN : 1 - a - b, fl_tv, fp_tv)
+        (fw_tv, fl_tv, fp_tv)
+    end
+    let  # invariant: on the cached delivered-map slice, wlp_apply must reproduce the notebook's delivered map
+        fw, fl, fp = wlp_apply(map40, map70)
+        @assert isequal(cat(fw, fl, fp; dims=3), recmap) "wlp_apply must reproduce the delivered map"
+        ng = count(!isnan, fl); lo, hi = extrema(filter(!isnan, fl))
+        Markdown.parse("**One-click apply** — `fw, fl, fp = wlp_apply(vmi_low, vmi_high)` on a co-registered $(Int(E40))/$(Int(E70)) keV VMI pair. Reproduces the delivered map bit-for-bit on the cached slice: $ng gated voxels, f_l ∈ [$(round(lo,digits=2)), $(round(hi,digits=2))].")
+    end
+end
+
+# ╔═╡ aaaa0028-0000-4000-8000-000000000028
+# Raw export: dump every CT scan as an ImageJ-openable .raw (full 512×512×3 z-stack), grouped by role
+# into data/recon/{calibration,test}/, with per-label truth in label_comps.csv. Reuses the LIVE sim
+# arrays (no .jls re-read). Column-major Float32/UInt8, little-endian, NOT dim2-reversed (figures use
+# yreversed=true ⇒ ImageJ row 0 = top). Circular sims share the calibration label stack.
+let
+    RECON = joinpath(@__DIR__, "data", "recon")
+    dims3(M) = "$(size(M,1))x$(size(M,2))x$(size(M,3))"
+    wf32(dir, base, kev, M) = write(joinpath(dir, "$(base)_vmi$(kev)keV_$(dims3(M))_float32.raw"), Array{Float32}(M))
+    wu8(dir, base, M)       = write(joinpath(dir, "$(base)_$(dims3(M))_uint8.raw"), Array{UInt8}(M))
+    scan(dir, base, h40, h70) = (wf32(dir, base, Int(E40), h40); wf32(dir, base, Int(E70), h70))
+    comps_csv(dir, rows) = open(joinpath(dir, "label_comps.csv"), "w") do io
+        println(io, "scan,label,f_water,f_lipid,f_protein")
+        for (name, comps) in rows, (k, c) in enumerate(comps)
+            @printf(io, "%s,%d,%.4f,%.4f,%.4f\n", name, ROD0 - 1 + k, c[1], c[2], c[3])
+        end
+    end
+    rm(RECON; recursive=true, force=true)
+    CAL = joinpath(RECON, "calibration"); TST = joinpath(RECON, "test"); mkpath(CAL); mkpath(TST)
+    NZ = size(map70v, 3)
+    crows = Tuple{String,Any}[]
+    for (i, s) in enumerate(calsims); scan(CAL, "noise_sim$i", s.hu40, s.hu70); push!(crows, ("noise_sim$i", s.comps)); end
+    scan(CAL, "deliveredmap", map40v, map70v); push!(crows, ("deliveredmap", mcomps))
+    wu8(CAL, "labels", repeat(map_m2, 1, 1, NZ)); comps_csv(CAL, crows)
+    trows = Tuple{String,Any}[]
+    for (i, s) in enumerate(testsims); scan(TST, "circular_sim$i", s.hu40, s.hu70); push!(trows, ("circular_sim$i", s.comps)); end
+    for (i, s) in enumerate(sectsims); scan(TST, "sector_sim$i", s.hu40, s.hu70); push!(trows, ("sector_sim$i", s.comps)); end
+    scan(TST, "sector_deliveredmap", smap40v, smap70v); push!(trows, ("sector_deliveredmap", scomps))
+    wu8(TST, "labels_circular", repeat(map_m2, 1, 1, NZ)); wu8(TST, "labels_sector", repeat(smap_m2, 1, 1, NZ)); comps_csv(TST, trows)
+    p = joinpath(CAL, "noise_sim1_vmi$(Int(E40))keV_512x512x$(NZ)_float32.raw")   # byte-layout round-trip
+    @assert reshape(reinterpret(Float32, read(p)), 512, 512, NZ) == Array{Float32}(calsims[1].hu40) "raw round-trip mismatch — byte layout wrong"
+    write(joinpath(RECON, "README_imagej.txt"), """
+ImageJ → File → Import → Raw…
+  Image type       = 32-bit Real  (*_float32.raw)   |   8-bit  (*_labels*_uint8.raw)
+  Width = nx, Height = ny, Number of images = nz (= $(NZ))   ·   ☑ Little-endian byte order
+Column-major, NOT dim2-reversed (notebook figures use yreversed=true ⇒ ImageJ row 0 = top).
+calibration/: noise_sim1..$(length(calsims)) + deliveredmap ; labels = shared insert stack (8..20).
+test/:  circular_sim1..$(length(testsims)) · sector_sim1..$(length(sectsims)) + sector_deliveredmap
+        labels_circular (8..20) · labels_sector (8..23).
+VMI keV pair: $(Int(E40)) / $(Int(E70)).  label_comps.csv (per folder) → each scan's per-label
+(f_water, f_lipid, f_protein) ground truth.
+""")
+    Markdown.parse("**Raws exported** → `data/recon/` — calibration: $(2*(length(calsims)+1)) scans, test: $(2*(length(testsims)+length(sectsims)+1)) scans (ImageJ 32-bit, little-endian, $(NZ)-slice stacks). Layout in `README_imagej.txt`.")
+end
+
 # ╔═╡ Cell order:
 # ╟─aaaa0002-0000-4000-8000-000000000002
 # ╟─aaaa0003-0000-4000-8000-000000000003
@@ -722,6 +790,8 @@ only for linear/FBP recon, so a clinical DLIR/QIR transfer must re-earn it empir
 # ╟─aaaa0013-0000-4000-8000-000000000013
 # ╠═aaaa0014-0000-4000-8000-000000000014
 # ╠═aaaa0026-0000-4000-8000-000000000026
+# ╠═aaaa0027-0000-4000-8000-000000000027
+# ╠═aaaa0028-0000-4000-8000-000000000028
 # ╟─aaaa0015-0000-4000-8000-000000000015
 # ╠═aaaa0016-0000-4000-8000-000000000016
 # ╠═aaaa0017-0000-4000-8000-000000000017
@@ -733,3 +803,5 @@ only for linear/FBP recon, so a clinical DLIR/QIR transfer must re-earn it empir
 # ╠═aaaa0023-0000-4000-8000-000000000023
 # ╠═aaaa0024-0000-4000-8000-000000000024
 # ╟─aaaa0025-0000-4000-8000-000000000025
+# ╠═aaaa0027-0000-4000-8000-000000000027
+# ╠═aaaa0028-0000-4000-8000-000000000028
