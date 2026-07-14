@@ -59,22 +59,22 @@ shared_gate(v70, v150) = (v70 .≥ HU_L[1] - 40) .& (v70 .≤ 150) .&
                          (v150 .≥ M.hu_lo) .& (v150 .≤ M.hu_hi)
 
 # ── 3-material estimator with tissue prior (per 2-D slice) ─────────────────────────────────────
-# decode → σ_f coupled Huber-TV → L1 protein sparsity + HU-consistent lipid refit.
-function decompose3(a, b, gate; beta = BETA, lambda = 0.05, iters = 25, eps = 0.04)
-    fw_u, fl_u, fp_u = decode_maps(M, a, b)                  # raw per-voxel (wlp-gated → NaN outside)
+# Water/lipid FIRST (clean 1-D GLS on the raw HU = 2-material image quality), then admit protein
+# only where a STRONGLY-smoothed, L1-thresholded off-line signal survives. Where f_p→0 the lipid
+# fraction is exactly the 2-material projection, so clean fat keeps 2-material noise; f_p appears
+# only in spatially-coherent fibrous/pericardial tissue.
+gls_fl(d1, d2) = (PL[1] * (Σi[1, 1] * d1 + Σi[1, 2] * d2) + PL[2] * (Σi[2, 1] * d1 + Σi[2, 2] * d2)) / plΣpl
+function decompose3(a, b, gate; beta = BETA, sm_lambda = 0.12, sm_iters = 50)
+    fw_u, fl_u, fp_u = decode_maps(M, a, b)                  # raw per-voxel decode (wlp-gated)
     w = sigma_f_weight(M, a, b)
-    fl_s, fp_s = tv_coupled(fl_u, fp_u, gate; lambda, iters, eps, w)  # denoise the 2-D decode
+    _, fp_s = tv_coupled(fl_u, fp_u, gate; lambda = sm_lambda, iters = sm_iters, eps = 0.04, w = w)  # smooth protein
     nx, ny = size(a)
     FW = fill(NaN, nx, ny); FL = similar(FW); FP = similar(FW)
     @inbounds for j in 1:ny, i in 1:nx
         gate[i, j] || continue
-        fls = fl_s[i, j]; fps = fp_s[i, j]
-        (isfinite(fls) && isfinite(fps)) || continue
-        ds1 = fls * PL[1] + fps * PP[1]                      # smoothed HU reconstruction (water=0)
-        ds2 = fls * PL[2] + fps * PP[2]
-        fp = max(fps - beta, 0.0)                            # L1 protein admission
-        dr1 = ds1 - fp * PP[1]; dr2 = ds2 - fp * PP[2]       # lipid refit on the residual
-        fl = (PL[1] * (Σi[1, 1] * dr1 + Σi[1, 2] * dr2) + PL[2] * (Σi[2, 1] * dr1 + Σi[2, 2] * dr2)) / plΣpl
+        fps = fp_s[i, j]; isfinite(fps) || continue
+        fp = max(fps - beta, 0.0)                            # L1 protein admission (else 0)
+        fl = gls_fl(a[i, j] - fp * PP[1], b[i, j] - fp * PP[2])   # lipid from RAW HU, protein removed
         fl = clamp(fl, 0.0, 1.0)
         if fl + fp > 1; s = fl + fp; fl /= s; fp /= s; end
         FL[i, j] = fl; FP[i, j] = fp; FW[i, j] = 1 - fl - fp
