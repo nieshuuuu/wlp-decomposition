@@ -73,8 +73,8 @@ begin
     theo_hu(mat, E) = (μw = BS.compute_μ_at_energy(WATER, E); 1000.0*(BS.compute_μ_at_energy(mat, E) - μw)/μw)
     mix_hu(fw, fl, fp, E) = theo_hu(wlp_material(fw,fl,fp), E)
     const WLP_PAIR = (70.0, 150.0)        # ← the keV pair knob (this branch tests 70/150; main uses 40/70)
-    const E40, E70 = WLP_PAIR             # historical slot names: E40=low, E70=high energy of the pair
-    const PL = (theo_hu(LIPID,E40), theo_hu(LIPID,E70)); const PP = (theo_hu(PROTEIN,E40), theo_hu(PROTEIN,E70)); const PW = (0.0, 0.0)
+    const ELO, EHI = WLP_PAIR             # low / high energy of the pair
+    const PL = (theo_hu(LIPID,ELO), theo_hu(LIPID,EHI)); const PP = (theo_hu(PROTEIN,ELO), theo_hu(PROTEIN,EHI)); const PW = (0.0, 0.0)
     md"Endpoints (theoretical HU): water=(0,0), lipid=$(round.(PL,digits=0)), protein=$(round.(PP,digits=0))."
 end
 
@@ -203,7 +203,7 @@ begin
         viod=_fbp(siod);vwat=_fbp(swat)
         zmed>0&&(viod=BS.apply_median_z(viod;adjacent_slices=zmed);vwat=BS.apply_median_z(vwat;adjacent_slices=zmed))
         ciod=viod.*1000f0
-        (hu40=BS.synth_vmi_2basis(vwat,ciod;energy_keV=E40),hu70=BS.synth_vmi_2basis(vwat,ciod;energy_keV=E70),geom=slo.geom)
+        (hu_lo=BS.synth_vmi_2basis(vwat,ciod;energy_keV=ELO),hu_hi=BS.synth_vmi_2basis(vwat,ciod;energy_keV=EHI),geom=slo.geom)
     end
     function roi_cores(pc,geom,matrix,labels; radius_px=12)
         m3=BS.resample_to_recon(pc,geom,matrix;method=:nearest); midz=size(m3,3)÷2+1; m2=m3[:,:,midz]
@@ -217,8 +217,8 @@ begin
         rc=roi_cores(pc,acq.geom,(RECON_N,RECON_N,3),collect(keys(label_comp)); radius_px=radius_px); out=NamedTuple[]
         for (lab,c) in label_comp
             (haskey(rc.cores,lab)&&!isempty(rc.cores[lab]))||continue; ci=rc.cores[lab]
-            v40=[Float64(acq.hu40[i,rc.midz]) for i in ci]; v70=[Float64(acq.hu70[i,rc.midz]) for i in ci]
-            push!(out,(lab=lab,fw=c[1],fl=c[2],fp=c[3],v40=v40,v70=v70,m40=mean(v40),m70=mean(v70),s40=std(v40),s70=std(v70)))
+            v_lo=[Float64(acq.hu_lo[i,rc.midz]) for i in ci]; v_hi=[Float64(acq.hu_hi[i,rc.midz]) for i in ci]
+            push!(out,(lab=lab,fw=c[1],fl=c[2],fp=c[3],v_lo=v_lo,v_hi=v_hi,m_lo=mean(v_lo),m_hi=mean(v_hi),s_lo=std(v_lo),s_hi=std(v_hi)))
         end
         (rois=out,midz=rc.midz,m2=rc.m2)
     end
@@ -230,7 +230,7 @@ md"## 5 · Inverse: calibration surface · noise · edge-preserving TV"
 
 # ╔═╡ aaaa0012-0000-4000-8000-000000000012
 begin
-    poly2(h4,h7)=[1.0,h4,h7,h4^2,h7^2,h4*h7]; surf(c,h4,h7)=dot(c,poly2(h4,h7))
+    poly2(hl,hh)=[1.0,hl,hh,hl^2,hh^2,hl*hh]; surf(c,hl,hh)=dot(c,poly2(hl,hh))
     quad_sigma(c,H)=c[1]*H^2+c[2]*H+c[3]
     fit_sigma_quad(hu,sig)=(X=hcat(hu.^2,hu,ones(length(hu)));c=X\sig;c[1]<0&&(Xa=hcat(hu,ones(length(hu)));ca=Xa\sig;c=[0.0,ca[1],ca[2]]);c)
     function metrics(t,r)
@@ -257,7 +257,7 @@ begin
         end
         ([mask[i,j] ? fl[i,j] : NaN for i in 1:nx,j in 1:ny],[mask[i,j] ? fp[i,j] : NaN for i in 1:nx,j in 1:ny])
     end
-    dpoly4(h4,h7)=[0.0,1.0,0.0,2h4,0.0,h7]; dpoly7(h4,h7)=[0.0,0.0,1.0,0.0,2h7,h4]
+    dpoly_lo(hl,hh)=[0.0,1.0,0.0,2hl,0.0,hh]; dpoly_hi(hl,hh)=[0.0,0.0,1.0,0.0,2hh,hl]
     label_centroid(m2,lab)=(idx=findall(==(UInt8(lab)),m2); (mean(getindex.(idx,1)),mean(getindex.(idx,2))))
     struct BayesPrior; μ_w::Float64; s_w::Float64; μ_l::Float64; s_l::Float64; α_p::Float64; θ_p::Float64; end
     bayes_prior_broad(comps;s_wl=0.15,fp_shape=1.2,fp_scale=0.10)=(fw=[c[1] for c in comps];fl=[c[2] for c in comps];BayesPrior(mean(fw),s_wl,mean(fl),s_wl,fp_shape,fp_scale))
@@ -267,22 +267,22 @@ end
 # ╔═╡ aaaa0013-0000-4000-8000-000000000013
 md"""## 6 · Run sims + calibrate + decode (cached)
 4 calibration + 1 map thorax; **5 circular-test + 4 sector-test** held-out (n = 65 + 64 = 129 ROIs); 4 centred
-integrated-HU sims. First run ≈ 20 min on GPU; results cache to `wlp_*_cache_70_150.jls`. Delete those to re-sim."""
+integrated-HU sims. First run ≈ 20 min on GPU; results cache to `data/wlp_*_cache_70_150.jls`. Delete those to re-sim."""
 
 # ╔═╡ aaaa0014-0000-4000-8000-000000000014
 begin
-    const PTAG   = "$(Int(E40))_$(Int(E70))"                       # pair-derived cache tag (each keV pair its own cache)
-    const CACHE  = joinpath(@__DIR__, "wlp_sim_cache_$(PTAG).jls") # calibration + delivered-map thorax
-    const TCACHE = joinpath(@__DIR__, "wlp_test_cache_$(PTAG).jls")# circular held-out test (5 sims)
-    const ICACHE = joinpath(@__DIR__, "wlp_int_cache_$(PTAG).jls")
-    const SCACHE = joinpath(@__DIR__, "wlp_sect_cache_$(PTAG).jls")
+    const PTAG   = "$(Int(ELO))_$(Int(EHI))"                       # pair-derived cache tag (each keV pair its own cache)
+    const CACHE  = joinpath(DATA, "wlp_sim_cache_$(PTAG).jls")     # calibration + delivered-map thorax
+    const TCACHE = joinpath(DATA, "wlp_test_cache_$(PTAG).jls")    # circular held-out test (5 sims)
+    const ICACHE = joinpath(DATA, "wlp_int_cache_$(PTAG).jls")
+    const SCACHE = joinpath(DATA, "wlp_sect_cache_$(PTAG).jls")
     const CORE_RPX = round(Int, INS_R/RECON_PX_MM - EROSION_PX)   # eroded interior core ≈ 225 mm²
     const IFL = 0.85
     # one packed-thorax acquisition → NHEART eroded insert cores (shared by calibration + circular test)
     _cores(seed, cseed) = begin
         comps = diverse_comps(cseed, NHEART); ph = build_thorax(comps); acq = run_acq(ph.gpu; seed=seed)
         lc = Dict(ROD0-1+k => comps[k] for k in 1:NHEART); r = collect_rois(acq, ph.cpu, lc; radius_px=CORE_RPX).rois
-        img = (; seed, hu40=Array(acq.hu40), hu70=Array(acq.hu70), comps)   # full z-stack CT for raw export (shared geometry ⇒ map_m2 labels)
+        img = (; seed, hu_lo=Array(acq.hu_lo), hu_hi=Array(acq.hu_hi), comps)   # full z-stack CT for raw export (shared geometry ⇒ map_m2 labels)
         ph=nothing; GC.gc(true); (rois=r, img=img)
     end
     # ── calibration (4 sims) + delivered-map thorax ──
@@ -292,11 +292,11 @@ begin
         for (si,seed) in enumerate((11,12,13,14)); c=_cores(seed, 1000+si); append!(calrois, c.rois); push!(calsims, c.img); end
         mcomps = diverse_comps(777, NHEART); mph = build_thorax(mcomps); macq = run_acq(mph.gpu; seed=999)
         mrc = roi_cores(mph.cpu, macq.geom, (RECON_N,RECON_N,3), collect(ROD0:(ROD0+NHEART-1)))
-        map40v = Array(macq.hu40); map70v = Array(macq.hu70); map_m2 = mrc.m2; mph=nothing; GC.gc(true)   # full z-stack; 2D map derived below
-        serialize(CACHE, (; calrois, map40v, map70v, map_m2, mcomps, calsims))
+        map_lo_v = Array(macq.hu_lo); map_hi_v = Array(macq.hu_hi); map_m2 = mrc.m2; mph=nothing; GC.gc(true)   # full z-stack; 2D map derived below
+        serialize(CACHE, (; calrois, map_lo_v, map_hi_v, map_m2, mcomps, calsims))
     end
-    Dm = deserialize(CACHE); calrois=Dm.calrois; map40v,map70v,map_m2,mcomps = Dm.map40v,Dm.map70v,Dm.map_m2,Dm.mcomps; calsims=Dm.calsims
-    mmid = size(map70v,3)÷2+1; map40 = map40v[:,:,mmid]; map70 = map70v[:,:,mmid]   # notebook figures/decode use the 2D mid slice
+    Dm = deserialize(CACHE); calrois=Dm.calrois; map_lo_v,map_hi_v,map_m2,mcomps = Dm.map_lo_v,Dm.map_hi_v,Dm.map_m2,Dm.mcomps; calsims=Dm.calsims
+    mmid = size(map_hi_v,3)÷2+1; map_lo = map_lo_v[:,:,mmid]; map_hi = map_hi_v[:,:,mmid]   # notebook figures/decode use the 2D mid slice
     # ── circular held-out test (5 sims → 65 ROIs; own cache) ──
     if !isfile(TCACHE)
         println("── running circular test thorax (5 sims) ──")
@@ -311,8 +311,8 @@ begin
         isims = NamedTuple[]
         for r in SPARSE_RADII
             ip = build_thorax([(1-IFL-0.05,IFL,0.05)]; centres=[(0.0,0.0)], radii=[r]); ia = run_acq(ip.gpu; seed=Int(round(500+r)))
-            im = size(ia.hu70,3)÷2+1; m2 = roi_cores(ip.cpu, ia.geom, (RECON_N,RECON_N,3), [ROD0]).m2
-            push!(isims, (r=r, hu40=Array(ia.hu40[:,:,im]), hu70=Array(ia.hu70[:,:,im]), m2=m2)); ip=nothing; GC.gc(true)
+            im = size(ia.hu_hi,3)÷2+1; m2 = roi_cores(ip.cpu, ia.geom, (RECON_N,RECON_N,3), [ROD0]).m2
+            push!(isims, (r=r, hu_lo=Array(ia.hu_lo[:,:,im]), hu_hi=Array(ia.hu_hi[:,:,im]), m2=m2)); ip=nothing; GC.gc(true)
         end
         serialize(ICACHE, (; isims))
     end
@@ -324,25 +324,25 @@ begin
         for (si,seed) in enumerate((401,402,405,406))                # 4 sims → 64 ROIs
             sc = diverse_comps(70260708+si, NSECT); sp = build_thorax(sc; sectors=(SECT_NANG,SECT_NRAD)); sa = run_acq(sp.gpu; seed=seed)
             lc = Dict(ROD0-1+k => sc[k] for k in 1:NSECT); append!(sectrois, collect_rois(sa, sp.cpu, lc; radius_px=7).rois)
-            push!(sectsims, (; seed, hu40=Array(sa.hu40), hu70=Array(sa.hu70), comps=sc)); sp=nothing; GC.gc(true)   # full z-stack
+            push!(sectsims, (; seed, hu_lo=Array(sa.hu_lo), hu_hi=Array(sa.hu_hi), comps=sc)); sp=nothing; GC.gc(true)   # full z-stack
         end
         scomps = diverse_comps(70260800, NSECT); smph = build_thorax(scomps; sectors=(SECT_NANG,SECT_NRAD)); smacq = run_acq(smph.gpu; seed=403)
         smrc = roi_cores(smph.cpu, smacq.geom, (RECON_N,RECON_N,3), collect(ROD0:(ROD0+NSECT-1)))
-        smap40v = Array(smacq.hu40); smap70v = Array(smacq.hu70); smap_m2 = smrc.m2; smph=nothing; GC.gc(true)   # full z-stack; 2D map derived below
-        serialize(SCACHE, (; sectrois, smap40v, smap70v, smap_m2, scomps, sectsims))
+        smap_lo_v = Array(smacq.hu_lo); smap_hi_v = Array(smacq.hu_hi); smap_m2 = smrc.m2; smph=nothing; GC.gc(true)   # full z-stack; 2D map derived below
+        serialize(SCACHE, (; sectrois, smap_lo_v, smap_hi_v, smap_m2, scomps, sectsims))
     end
-    DS = deserialize(SCACHE); sectrois=DS.sectrois; smap40v,smap70v,smap_m2,scomps = DS.smap40v,DS.smap70v,DS.smap_m2,DS.scomps; sectsims=DS.sectsims
-    smid = size(smap70v,3)÷2+1; smap40 = smap40v[:,:,smid]; smap70 = smap70v[:,:,smid]   # notebook figures/decode use the 2D mid slice
+    DS = deserialize(SCACHE); sectrois=DS.sectrois; smap_lo_v,smap_hi_v,smap_m2,scomps = DS.smap_lo_v,DS.smap_hi_v,DS.smap_m2,DS.scomps; sectsims=DS.sectsims
+    smid = size(smap_hi_v,3)÷2+1; smap_lo = smap_lo_v[:,:,smid]; smap_hi = smap_hi_v[:,:,smid]   # notebook figures/decode use the 2D mid slice
 
     # ── calibration: quadratic surface (point accuracy) + AFFINE lipid (integrals) + noise ladder ──
-    m40c=[r.m40 for r in calrois]; m70c=[r.m70 for r in calrois]
+    m_lo_cal=[r.m_lo for r in calrois]; m_hi_cal=[r.m_hi for r in calrois]
     fwc=[r.fw for r in calrois]; flc=[r.fl for r in calrois]; fpc=[r.fp for r in calrois]
-    Xc=reduce(vcat,[poly2(m40c[i],m70c[i])' for i in eachindex(m40c)])
+    Xc=reduce(vcat,[poly2(m_lo_cal[i],m_hi_cal[i])' for i in eachindex(m_lo_cal)])
     cw=Xc\fwc; cl=Xc\flc; cp=Xc\fpc                                       # unconstrained LS — pinning to theoretical corners bent near-pure-fat 3× (2026-07-14)
-    Xa=hcat(ones(length(m40c)),m40c,m70c); cl_aff=Xa\flc                 # affine f_l — linear ⇒ commutes with the PSF
-    r2fit(c,y)=1-sum((surf.(Ref(c),m40c,m70c).-y).^2)/sum((y.-mean(y)).^2)
-    sc40=fit_sigma_quad(m40c,[r.s40 for r in calrois]); sc70=fit_sigma_quad(m70c,[r.s70 for r in calrois])
-    res40=vcat([r.v40.-r.m40 for r in calrois]...); res70=vcat([r.v70.-r.m70 for r in calrois]...); ρ=cor(res40,res70)
+    Xa=hcat(ones(length(m_lo_cal)),m_lo_cal,m_hi_cal); cl_aff=Xa\flc                 # affine f_l — linear ⇒ commutes with the PSF
+    r2fit(c,y)=1-sum((surf.(Ref(c),m_lo_cal,m_hi_cal).-y).^2)/sum((y.-mean(y)).^2)
+    sc_lo=fit_sigma_quad(m_lo_cal,[r.s_lo for r in calrois]); sc_hi=fit_sigma_quad(m_hi_cal,[r.s_hi for r in calrois])
+    res_lo=vcat([r.v_lo.-r.m_lo for r in calrois]...); res_hi=vcat([r.v_hi.-r.m_hi for r in calrois]...); ρ=cor(res_lo,res_hi)
     adipose=draw_wlp(20260708,2000); prior=bayes_prior_broad(adipose)
     decode(a,b)=(x=surf(cw,a,b);y=surf(cl,a,b);z=surf(cp,a,b);s=x+y+z;(x/s,y/s,z/s))
     aff_l(a,b)=cl_aff[1]+cl_aff[2]*a+cl_aff[3]*b
@@ -354,10 +354,10 @@ begin
     # σ₇₀≫σ₁₅₀ and ρ≈0.79, so the noise ball is a tilted ellipse). G maps (f_l,f_p) → measured HU;
     # bias_hu = mean(recon − linear-mix theory) over the cal rods de-biases the exact inverse.
     Gmat = [PL[1]-PW[1] PP[1]-PW[1]; PL[2]-PW[2] PP[2]-PW[2]]
-    Σhu  = (s70=std(res40); s150=std(res70); [s70^2 ρ*s70*s150; ρ*s70*s150 s150^2])
+    Σhu  = (s70=std(res_lo); s150=std(res_hi); [s70^2 ρ*s70*s150; ρ*s70*s150 s150^2])
     Σinv = inv(Σhu); Amet = Gmat' * Σinv * Gmat                    # metric on (f_l,f_p)
-    bias_hu = [mean(m40c .- [r.fl*PL[1]+r.fp*PP[1] for r in calrois]),
-               mean(m70c .- [r.fl*PL[2]+r.fp*PP[2] for r in calrois])]
+    bias_hu = [mean(m_lo_cal .- [r.fl*PL[1]+r.fp*PP[1] for r in calrois]),
+               mean(m_hi_cal .- [r.fl*PL[2]+r.fp*PP[2] for r in calrois])]
     insimplex(fl,fp) = fl≥-1e-9 && fp≥-1e-9 && (fl+fp)≤1+1e-9
     function proj_simplex(θ)                                        # θ=(f_l,f_p); Mahalanobis-closest vertex/edge
         insimplex(θ...) && return θ
@@ -378,23 +378,23 @@ begin
     # ── point accuracy: combined circular + sector, per-voxel decode over the eroded core (GT only locates) ──
     allrois=vcat(testrois,sectrois); geomtag=vcat(fill(:circular,length(testrois)),fill(:sector,length(sectrois)))
     tfw=[r.fw for r in allrois];tfl=[r.fl for r in allrois];tfp=[r.fp for r in allrois]
-    pvox(r)=[decode(r.v40[j],r.v70[j]) for j in eachindex(r.v40)]
+    pvox(r)=[decode(r.v_lo[j],r.v_hi[j]) for j in eachindex(r.v_lo)]
     pfw=[mean(getindex.(pvox(r),1)) for r in allrois]; pfl=[mean(getindex.(pvox(r),2)) for r in allrois]; pfp=[mean(getindex.(pvox(r),3)) for r in allrois]
-    semfw=[std(getindex.(pvox(r),1))/sqrt(length(r.v40)) for r in allrois]
-    semfl=[std(getindex.(pvox(r),2))/sqrt(length(r.v40)) for r in allrois]; semfp=[std(getindex.(pvox(r),3))/sqrt(length(r.v40)) for r in allrois]
+    semfw=[std(getindex.(pvox(r),1))/sqrt(length(r.v_lo)) for r in allrois]
+    semfl=[std(getindex.(pvox(r),2))/sqrt(length(r.v_lo)) for r in allrois]; semfp=[std(getindex.(pvox(r),3))/sqrt(length(r.v_lo)) for r in allrois]
     mw=metrics(tfw,pfw);ml=metrics(tfl,pfl);mp=metrics(tfp,pfp)
-    pfl_pool=[decode(r.m40,r.m70)[2] for r in allrois]; ml_pool=metrics(tfl,pfl_pool)
-    dHU70=[abs(mix_hu(pfw[i],pfl[i],pfp[i],E70)-mix_hu(tfw[i],tfl[i],tfp[i],E70)) for i in eachindex(tfw)]
+    pfl_pool=[decode(r.m_lo,r.m_hi)[2] for r in allrois]; ml_pool=metrics(tfl,pfl_pool)
+    dHU_hi=[abs(mix_hu(pfw[i],pfl[i],pfp[i],EHI)-mix_hu(tfw[i],tfl[i],tfp[i],EHI)) for i in eachindex(tfw)]
 
     # ── out-of-triangle diagnostic + feasible pooled decode (noise-ellipse MLE) ──
     # Per-voxel decodes leave the simplex under noise; that is EXPECTED (a near-edge composition
     # scattered by ε). We do NOT project per-voxel — rectifying each voxel before averaging would
     # bias the ROI mean (Jensen). We report the per-voxel infeasible rate, then deliver the pooled
     # ROI decode through decode_feas so any ROI whose MEAN still lands outside is MLE-projected.
-    nvox_all=sum(length(r.v40) for r in allrois)
-    nvox_out=sum(count(any(decode(r.v40[j],r.v70[j]).<-1e-6) for j in eachindex(r.v40)) for r in allrois)
-    nroi_out=count(any(decode(r.m40,r.m70).<-1e-6) for r in allrois)
-    pfeas=[decode_feas(r.m40,r.m70) for r in allrois]                 # feasible-by-construction ROI composition
+    nvox_all=sum(length(r.v_lo) for r in allrois)
+    nvox_out=sum(count(any(decode(r.v_lo[j],r.v_hi[j]).<-1e-6) for j in eachindex(r.v_lo)) for r in allrois)
+    nroi_out=count(any(decode(r.m_lo,r.m_hi).<-1e-6) for r in allrois)
+    pfeas=[decode_feas(r.m_lo,r.m_hi) for r in allrois]                 # feasible-by-construction ROI composition
     pfw_feas=getindex.(pfeas,1); pfl_feas=getindex.(pfeas,2); pfp_feas=getindex.(pfeas,3)
     mw_feas=metrics(tfw,pfw_feas); ml_feas=metrics(tfl,pfl_feas); mp_feas=metrics(tfp,pfp_feas)
     @printf("OUT-OF-TRIANGLE: per-voxel %d/%d (%.1f%%) infeasible | ROI-mean %d/%d | pooled-feasible CCC f_w=%.3f f_l=%.3f f_p=%.3f\n",
@@ -402,53 +402,53 @@ begin
 
     # ── delivered map: per-voxel decode over gated soft tissue + σ_f-weighted edge-preserving Huber-TV ──
     const SOFT_HU_LO, SOFT_HU_HI = -300.0, 250.0
-    function sigma_f_weight(h40,h70)
-        w=fill(NaN,size(h70))
-        for I in CartesianIndices(h70); (SOFT_HU_LO<h70[I]<SOFT_HU_HI)||continue
-            h4=Float64(h40[I]);h7=Float64(h70[I]); s4=quad_sigma(sc40,h4);s7=quad_sigma(sc70,h7)
-            g4l=dot(cl,dpoly4(h4,h7));g7l=dot(cl,dpoly7(h4,h7)); g4p=dot(cp,dpoly4(h4,h7));g7p=dot(cp,dpoly7(h4,h7))
-            vl=g4l^2*s4^2+g7l^2*s7^2+2ρ*g4l*g7l*s4*s7; vp=g4p^2*s4^2+g7p^2*s7^2+2ρ*g4p*g7p*s4*s7
+    function sigma_f_weight(h_lo,h_hi)
+        w=fill(NaN,size(h_hi))
+        for I in CartesianIndices(h_hi); (SOFT_HU_LO<h_hi[I]<SOFT_HU_HI)||continue
+            hl=Float64(h_lo[I]);hh=Float64(h_hi[I]); sig_lo=quad_sigma(sc_lo,hl);sig_hi=quad_sigma(sc_hi,hh)
+            g_lo_l=dot(cl,dpoly_lo(hl,hh));g_hi_l=dot(cl,dpoly_hi(hl,hh)); g_lo_p=dot(cp,dpoly_lo(hl,hh));g_hi_p=dot(cp,dpoly_hi(hl,hh))
+            vl=g_lo_l^2*sig_lo^2+g_hi_l^2*sig_hi^2+2ρ*g_lo_l*g_hi_l*sig_lo*sig_hi; vp=g_lo_p^2*sig_lo^2+g_hi_p^2*sig_hi^2+2ρ*g_lo_p*g_hi_p*sig_lo*sig_hi
             w[I]=1.0/max(vl+vp,1e-6)
         end; w
     end
-    function fullfield(h40,h70)
-        fw=fill(NaN,size(h70));fl=copy(fw);fp=copy(fw)
-        for I in CartesianIndices(h70); (SOFT_HU_LO<h70[I]<SOFT_HU_HI)||continue
-            d=decode(Float64(h40[I]),Float64(h70[I])); fw[I]=d[1];fl[I]=d[2];fp[I]=d[3]; end
+    function fullfield(h_lo,h_hi)
+        fw=fill(NaN,size(h_hi));fl=copy(fw);fp=copy(fw)
+        for I in CartesianIndices(h_hi); (SOFT_HU_LO<h_hi[I]<SOFT_HU_HI)||continue
+            d=decode(Float64(h_lo[I]),Float64(h_hi[I])); fw[I]=d[1];fl[I]=d[2];fp[I]=d[3]; end
         (fw,fl,fp)
     end
-    function deliver(m40,m70,m2,comps)
-        f0=fullfield(m40,m70); gate=.!isnan.(f0[2]); w=sigma_f_weight(m40,m70)
+    function deliver(m_lo,m_hi,m2,comps)
+        f0=fullfield(m_lo,m_hi); gate=.!isnan.(f0[2]); w=sigma_f_weight(m_lo,m_hi)
         fl_tv,fp_tv=tv_coupled(f0[2],f0[3],gate; lambda=0.05,iters=25,eps=0.04,w=w)
         fw_tv=map((a,b)-> isnan(a) ? NaN : 1-a-b, fl_tv, fp_tv)
         rec=cat(fw_tv,fl_tv,fp_tv;dims=3); tru=fill(NaN,size(m2)...,3); recgt=fill(NaN,size(m2)...,3)
         for k in 1:length(comps); lab=ROD0-1+k
             idx=findall(==(UInt8(lab)),m2); isempty(idx)&&continue
-            d=decode(mean(Float64(m40[I]) for I in idx),mean(Float64(m70[I]) for I in idx))
+            d=decode(mean(Float64(m_lo[I]) for I in idx),mean(Float64(m_hi[I]) for I in idx))
             for I in idx; tru[I,1],tru[I,2],tru[I,3]=comps[k]; recgt[I,1],recgt[I,2],recgt[I,3]=d; end
         end
         (rec=rec,tru=tru,recgt=recgt)
     end
-    circ = deliver(map40,map70,map_m2,mcomps)
-    sect = deliver(smap40,smap70,smap_m2,scomps)
+    circ = deliver(map_lo,map_hi,map_m2,mcomps)
+    sect = deliver(smap_lo,smap_hi,smap_m2,scomps)
     recmap=circ.rec; truemap=circ.tru; recmap_gt=circ.recgt
 
     # ── integrated-HU: EXCESS lipid over local muscle; conservation recovers ∫(f_l−bg) without the boundary ──
     const FIXED_MARGIN_PX = 8.0
-    IFAT=(1-IFL-0.05,IFL,0.05); FAT_AFF=aff_l(mix_hu(IFAT...,E40),mix_hu(IFAT...,E70))   # affine content; vs IFL = decode bias
+    IFAT=(1-IFL-0.05,IFL,0.05); FAT_AFF=aff_l(mix_hu(IFAT...,ELO),mix_hu(IFAT...,EHI))   # affine content; vs IFL = decode bias
     integ = NamedTuple[]
     for s in isims
-        i40=s.hu40; i70=s.hu70; m2=s.m2; r_mm=s.r; rpx=r_mm/RECON_PX_MM; (cx,cy)=label_centroid(m2,ROD0)
+        i_lo=s.hu_lo; i_hi=s.hu_hi; m2=s.m2; r_mm=s.r; rpx=r_mm/RECON_PX_MM; (cx,cy)=label_centroid(m2,ROD0)
         qb(i,j)=[1.0,i-cx,j-cy,(i-cx)^2,(j-cy)^2,(i-cx)*(j-cy)]                          # global quadratic muscle bg (cupping)
-        hm=[CartesianIndex(i,j) for i in axes(i40,1),j in axes(i40,2) if m2[i,j]==0x02 && (i-cx)^2+(j-cy)^2≤(60.0/RECON_PX_MM)^2]
-        cg=reduce(vcat,[qb(I[1],I[2])' for I in hm])\[aff_l(Float64(i40[I]),Float64(i70[I])) for I in hm]
+        hm=[CartesianIndex(i,j) for i in axes(i_lo,1),j in axes(i_lo,2) if m2[i,j]==0x02 && (i-cx)^2+(j-cy)^2≤(60.0/RECON_PX_MM)^2]
+        cg=reduce(vcat,[qb(I[1],I[2])' for I in hm])\[aff_l(Float64(i_lo[I]),Float64(i_hi[I])) for I in hm]
         bgf(i,j)=dot(cg,qb(i,j)); bg0=bgf(cx,cy); truelip=π*r_mm^2*(FAT_AFF-bg0)
         margins=0.0:1.0:16.0; recov=Float64[]
         for mg in margins
             R=rpx+mg; acc=0.0
-            for i in axes(i40,1), j in axes(i40,2)
-                (i-cx)^2+(j-cy)^2≤R^2 || continue; (SOFT_HU_LO<i70[i,j]<SOFT_HU_HI) || continue
-                acc += aff_l(Float64(i40[i,j]),Float64(i70[i,j])) - bgf(i,j)
+            for i in axes(i_lo,1), j in axes(i_lo,2)
+                (i-cx)^2+(j-cy)^2≤R^2 || continue; (SOFT_HU_LO<i_hi[i,j]<SOFT_HU_HI) || continue
+                acc += aff_l(Float64(i_lo[i,j]),Float64(i_hi[i,j])) - bgf(i,j)
             end
             push!(recov, acc*RECON_PX_MM^2)
         end
@@ -456,7 +456,7 @@ begin
         push!(integ,(r=r_mm,fl=IFL,truelip=truelip,bg=bg0,naivelip=recov[1],intlip=recov[bi],margins=collect(margins),recov=recov))
     end
     @printf("PAIR %g/%g keV | cal n=%d R²(f_w)=%.3f ρ=%.3f | TEST n=%d: f_w CCC=%.3f f_l CCC=%.3f f_p CCC=%.3f | cond(G)=%.1f | integrated %.0f–%.0f%% vs naive %.0f–%.0f%%\n",
-        E40,E70,length(calrois),r2fit(cw,fwc),ρ,length(allrois),mw.ccc,ml.ccc,mp.ccc,
+        ELO,EHI,length(calrois),r2fit(cw,fwc),ρ,length(allrois),mw.ccc,ml.ccc,mp.ccc,
         cond([PL[1]-PW[1] PP[1]-PW[1]; PL[2]-PW[2] PP[2]-PW[2]]),
         100*minimum(r.intlip/r.truelip for r in integ),100*maximum(r.intlip/r.truelip for r in integ),
         100*minimum(r.naivelip/r.truelip for r in integ),100*maximum(r.naivelip/r.truelip for r in integ))
@@ -473,11 +473,11 @@ begin
     const MODEL_TOML = joinpath(@__DIR__, "wlp_model_$(PTAG).toml")
     open(MODEL_TOML, "w") do io
         TOML.print(io, Dict(
-            "pair" => Dict("E_low_keV"=>E40, "E_high_keV"=>E70),
+            "pair" => Dict("E_low_keV"=>ELO, "E_high_keV"=>EHI),
             "endpoints_hu" => Dict("water"=>collect(PW), "lipid"=>collect(PL), "protein"=>collect(PP)),
             "poly2" => Dict("basis"=>"[1, hLow, hHigh, hLow^2, hHigh^2, hLow*hHigh] -> (fw,fl,fp), normalized by sum",
                 "cw"=>cw, "cl"=>cl, "cp"=>cp, "cl_affine"=>cl_aff),
-            "noise" => Dict("sigma_quad_low"=>sc40, "sigma_quad_high"=>sc70, "rho"=>ρ,
+            "noise" => Dict("sigma_quad_low"=>sc_lo, "sigma_quad_high"=>sc_hi, "rho"=>ρ,
                 "Sigma_hu"=>[collect(Σhu[i,:]) for i in 1:2], "bias_hu"=>bias_hu),
             "gate" => Dict("soft_hu_lo"=>SOFT_HU_LO, "soft_hu_hi"=>SOFT_HU_HI),
             "provenance" => Dict("source"=>"wlp_decomposition.jl",
@@ -485,12 +485,80 @@ begin
                 "cal_n"=>length(calrois), "r2_fw_fit"=>r2fit(cw,fwc), "test_n"=>length(allrois),
                 "test_ccc"=>[mw.ccc, ml.ccc, mp.ccc], "test_rmse"=>[mw.rmse, ml.rmse, mp.rmse]),
             "calibration_table" => Dict("fw"=>fwc, "fl"=>flc, "fp"=>fpc,
-                "hu_low_mean"=>m40c, "hu_high_mean"=>m70c,
-                "hu_low_std"=>[r.s40 for r in calrois], "hu_high_std"=>[r.s70 for r in calrois],
-                "n_vox"=>[length(r.v40) for r in calrois]),
+                "hu_low_mean"=>m_lo_cal, "hu_high_mean"=>m_hi_cal,
+                "hu_low_std"=>[r.s_lo for r in calrois], "hu_high_std"=>[r.s_hi for r in calrois],
+                "n_vox"=>[length(r.v_lo) for r in calrois]),
         ))
     end
     Markdown.parse("**Model snapshot** → `$(basename(MODEL_TOML))` (poly2 surface + noise + gate + calibration table; applied live by the `wlp_apply` cell below).")
+end
+
+# ╔═╡ aaaa0027-0000-4000-8000-000000000027
+# One-click product: apply the fitted model to ANY co-registered VMI pair from the same 70/150-keV
+# chain → (f_w, f_l, f_p) maps. No external file, no re-fit — the model IS the live fitted globals
+# (cw,cl,cp,cl_aff, sc_lo,sc_hi, ρ, the soft-tissue gate); this reuses the delivered-map pipeline
+# (fullfield · sigma_f_weight · tv_coupled) verbatim, so the product and the validation share one method.
+begin
+    # tv=true → boundary-agnostic delivered map (2D slice); tv=false → raw per-voxel decode (any dim).
+    function wlp_apply(vmi_low, vmi_high; tv=true)
+        fw, fl, fp = fullfield(vmi_low, vmi_high)
+        tv || return (fw, fl, fp)
+        gate = .!isnan.(fl); w = sigma_f_weight(vmi_low, vmi_high)
+        fl_tv, fp_tv = tv_coupled(fl, fp, gate; lambda=0.05, iters=25, eps=0.04, w=w)
+        fw_tv = map((a, b) -> isnan(a) ? NaN : 1 - a - b, fl_tv, fp_tv)
+        (fw_tv, fl_tv, fp_tv)
+    end
+    let  # invariant: on the cached delivered-map slice, wlp_apply must reproduce the notebook's delivered map
+        fw, fl, fp = wlp_apply(map_lo, map_hi)
+        @assert isequal(cat(fw, fl, fp; dims=3), recmap) "wlp_apply must reproduce the delivered map"
+        ng = count(!isnan, fl); lo, hi = extrema(filter(!isnan, fl))
+        Markdown.parse("**One-click apply** — `fw, fl, fp = wlp_apply(vmi_low, vmi_high)` on a co-registered $(Int(ELO))/$(Int(EHI)) keV VMI pair. Reproduces the delivered map bit-for-bit on the cached slice: $ng gated voxels, f_l ∈ [$(round(lo,digits=2)), $(round(hi,digits=2))].")
+    end
+end
+
+# ╔═╡ aaaa0028-0000-4000-8000-000000000028
+# Raw export: dump every CT scan as an ImageJ-openable .raw (full 512×512×3 z-stack), grouped by role
+# into data/recon/{calibration,test}/, with per-label truth in label_comps.csv. Reuses the LIVE sim
+# arrays (no .jls re-read). Column-major Float32/UInt8, little-endian, NOT dim2-reversed (figures use
+# yreversed=true ⇒ ImageJ row 0 = top). Circular sims share the calibration label stack.
+let
+    RECON = joinpath(@__DIR__, "data", "recon")
+    dims3(M) = "$(size(M,1))x$(size(M,2))x$(size(M,3))"
+    wf32(dir, base, kev, M) = write(joinpath(dir, "$(base)_vmi$(kev)keV_$(dims3(M))_float32.raw"), Array{Float32}(M))
+    wu8(dir, base, M)       = write(joinpath(dir, "$(base)_$(dims3(M))_uint8.raw"), Array{UInt8}(M))
+    scan(dir, base, h_lo, h_hi) = (wf32(dir, base, Int(ELO), h_lo); wf32(dir, base, Int(EHI), h_hi))
+    comps_csv(dir, rows) = open(joinpath(dir, "label_comps.csv"), "w") do io
+        println(io, "scan,label,f_water,f_lipid,f_protein")
+        for (name, comps) in rows, (k, c) in enumerate(comps)
+            @printf(io, "%s,%d,%.4f,%.4f,%.4f\n", name, ROD0 - 1 + k, c[1], c[2], c[3])
+        end
+    end
+    rm(RECON; recursive=true, force=true)
+    CAL = joinpath(RECON, "calibration"); TST = joinpath(RECON, "test"); mkpath(CAL); mkpath(TST)
+    NZ = size(map_hi_v, 3)
+    crows = Tuple{String,Any}[]
+    for (i, s) in enumerate(calsims); scan(CAL, "noise_sim$i", s.hu_lo, s.hu_hi); push!(crows, ("noise_sim$i", s.comps)); end
+    scan(CAL, "deliveredmap", map_lo_v, map_hi_v); push!(crows, ("deliveredmap", mcomps))
+    wu8(CAL, "labels", repeat(map_m2, 1, 1, NZ)); comps_csv(CAL, crows)
+    trows = Tuple{String,Any}[]
+    for (i, s) in enumerate(testsims); scan(TST, "circular_sim$i", s.hu_lo, s.hu_hi); push!(trows, ("circular_sim$i", s.comps)); end
+    for (i, s) in enumerate(sectsims); scan(TST, "sector_sim$i", s.hu_lo, s.hu_hi); push!(trows, ("sector_sim$i", s.comps)); end
+    scan(TST, "sector_deliveredmap", smap_lo_v, smap_hi_v); push!(trows, ("sector_deliveredmap", scomps))
+    wu8(TST, "labels_circular", repeat(map_m2, 1, 1, NZ)); wu8(TST, "labels_sector", repeat(smap_m2, 1, 1, NZ)); comps_csv(TST, trows)
+    p = joinpath(CAL, "noise_sim1_vmi$(Int(ELO))keV_512x512x$(NZ)_float32.raw")   # byte-layout round-trip
+    @assert reshape(reinterpret(Float32, read(p)), 512, 512, NZ) == Array{Float32}(calsims[1].hu_lo) "raw round-trip mismatch — byte layout wrong"
+    write(joinpath(RECON, "README_imagej.txt"), """
+ImageJ → File → Import → Raw…
+  Image type       = 32-bit Real  (*_float32.raw)   |   8-bit  (*_labels*_uint8.raw)
+  Width = nx, Height = ny, Number of images = nz (= $(NZ))   ·   ☑ Little-endian byte order
+Column-major, NOT dim2-reversed (notebook figures use yreversed=true ⇒ ImageJ row 0 = top).
+calibration/: noise_sim1..$(length(calsims)) + deliveredmap ; labels = shared insert stack (8..20).
+test/:  circular_sim1..$(length(testsims)) · sector_sim1..$(length(sectsims)) + sector_deliveredmap
+        labels_circular (8..20) · labels_sector (8..23).
+VMI keV pair: $(Int(ELO)) / $(Int(EHI)).  label_comps.csv (per folder) → each scan's per-label
+(f_water, f_lipid, f_protein) ground truth.
+""")
+    Markdown.parse("**Raws exported** → `data/recon/` — calibration: $(2*(length(calsims)+1)) scans, test: $(2*(length(testsims)+length(sectsims)+1)) scans (ImageJ 32-bit, little-endian, $(NZ)-slice stacks). Layout in `README_imagej.txt`.")
 end
 
 # ╔═╡ aaaa0015-0000-4000-8000-000000000015
@@ -504,14 +572,14 @@ md"## 7 · Figures"
 let
     # ── per-voxel HU + feasibility across all scored ROIs (circular + sector) ──
     HUx=Float64[]; HUy=Float64[]; feas=Bool[]
-    for r in allrois, j in eachindex(r.v40)
-        d=decode(r.v40[j],r.v70[j]); push!(HUx,r.v40[j]); push!(HUy,r.v70[j]); push!(feas, all(d.≥-1e-9))
+    for r in allrois, j in eachindex(r.v_lo)
+        d=decode(r.v_lo[j],r.v_hi[j]); push!(HUx,r.v_lo[j]); push!(HUy,r.v_hi[j]); push!(feas, all(d.≥-1e-9))
     end
     stride=max(1,length(HUx)÷5000); ss=1:stride:length(HUx)                       # deterministic thin for plotting
     fin=[i for i in ss if feas[i]]; fout=[i for i in ss if !feas[i]]
     pv_out=100*count(!,feas)/length(feas)
-    rmx=[r.m40 for r in allrois]; rmy=[r.m70 for r in allrois]
-    rout=findall(any(decode(r.m40,r.m70).<-1e-6) for r in allrois)                 # ROI means outside the simplex
+    rmx=[r.m_lo for r in allrois]; rmy=[r.m_hi for r in allrois]
+    rout=findall(any(decode(r.m_lo,r.m_hi).<-1e-6) for r in allrois)                 # ROI means outside the simplex
     condG=cond(Gmat); s70v=sqrt(Σhu[1,1]); s150v=sqrt(Σhu[2,2])
     CIN=CM.RGBf(0.353,0.655,0.353); COUT=CM.RGBf(0.557,0.373,0.659)                # feasible / infeasible
     CWv=CM.RGBf(0.231,0.459,0.690); CLv=CM.RGBf(0.910,0.639,0.239); CPv=CM.RGBf(0.757,0.267,0.235)
@@ -519,7 +587,7 @@ let
 
     f=CM.Figure(size=(1180,520))
     # ── Panel A: the whole triangle (equal aspect ⇒ the sliver is honest) ──
-    axA=CM.Axis(f[1,1];xlabel="HU @ $(Int(E40)) keV",ylabel="HU @ $(Int(E70)) keV",
+    axA=CM.Axis(f[1,1];xlabel="HU @ $(Int(ELO)) keV",ylabel="HU @ $(Int(EHI)) keV",
                 title="The W/L/P triangle is a sliver (cond G = $(round(condG,digits=1)))",aspect=CM.DataAspect())
     CM.poly!(axA,[CM.Point2f(PW...),CM.Point2f(PL...),CM.Point2f(PP...)];color=(:gray,0.10),strokecolor=(:black,0.45),strokewidth=1.2)
     CM.scatter!(axA,HUx[fin],HUy[fin];color=(CIN,0.30),markersize=3,label="decode inside")
@@ -532,7 +600,7 @@ let
     CM.text!(axA,zx1,zy1;text="B",fontsize=11,font=:bold,color=(:black,0.7),align=(:left,:bottom))
     CM.axislegend(axA;position=:lt,framevisible=false,labelsize=9)
     # ── Panel B: zoom on the water–lipid corner + noise ellipse + MLE projections ──
-    axB=CM.Axis(f[1,2];xlabel="HU @ $(Int(E40)) keV",ylabel="HU @ $(Int(E70)) keV",
+    axB=CM.Axis(f[1,2];xlabel="HU @ $(Int(ELO)) keV",ylabel="HU @ $(Int(EHI)) keV",
                 title="Out-of-triangle ROI means → Σ⁻¹ (Mahalanobis) MLE projection",limits=(zx0,zx1,zy0,10.0))
     CM.poly!(axB,[CM.Point2f(PW...),CM.Point2f(PL...),CM.Point2f(PP...)];color=(:gray,0.10),strokecolor=(:black,0.45),strokewidth=1.2)
     inz=[i for i in 1:length(HUx) if zx0≤HUx[i]≤zx1 && zy0≤HUy[i]≤zy1]
@@ -561,18 +629,18 @@ end
 # ╔═╡ aaaa0017-0000-4000-8000-000000000017
 let f=CM.Figure(size=(1050,460))
     ax=CM.Axis(f[1,1];xlabel="HU",ylabel="σ (HU)",title="σ(HU) per energy — convex-quadratic")
-    for (hu,sg,cc,e,col) in ((m40c,[r.s40 for r in calrois],sc40,E40,:tomato),(m70c,[r.s70 for r in calrois],sc70,E70,:royalblue))
+    for (hu,sg,cc,e,col) in ((m_lo_cal,[r.s_lo for r in calrois],sc_lo,ELO,:tomato),(m_hi_cal,[r.s_hi for r in calrois],sc_hi,EHI,:royalblue))
         CM.scatter!(ax,hu,sg;color=col,markersize=8,label="$(Int(e)) keV"); g=range(minimum(hu),maximum(hu),100); CM.lines!(ax,g,quad_sigma.(Ref(cc),g);color=col)
     end
     CM.axislegend(ax;position=:rt)
-    ax2=CM.Axis(f[1,2];xlabel="resid HU$(Int(E40))",ylabel="resid HU$(Int(E70))",title="inter-energy ρ=$(round(ρ,digits=2))")
-    idx=rand(1:length(res40),min(3000,length(res40))); CM.scatter!(ax2,res40[idx],res70[idx];markersize=3,color=(:purple,0.3))
+    ax2=CM.Axis(f[1,2];xlabel="resid HU$(Int(ELO))",ylabel="resid HU$(Int(EHI))",title="inter-energy ρ=$(round(ρ,digits=2))")
+    idx=rand(1:length(res_lo),min(3000,length(res_lo))); CM.scatter!(ax2,res_lo[idx],res_hi[idx];markersize=3,color=(:purple,0.3))
     safe_save(joinpath(ASSET,"fig2_noise.png"),f); f
 end
 
 # ╔═╡ aaaa0018-0000-4000-8000-000000000018
 let f=CM.Figure(size=(1520,430))
-    ax=CM.Axis(f[1,1];title="VMI $(Int(E70)) keV",aspect=CM.DataAspect(),yreversed=true); CM.hidedecorations!(ax); CM.heatmap!(ax,map70;colormap=:grays,colorrange=(-200,300))
+    ax=CM.Axis(f[1,1];title="VMI $(Int(EHI)) keV",aspect=CM.DataAspect(),yreversed=true); CM.hidedecorations!(ax); CM.heatmap!(ax,map_hi;colormap=:grays,colorrange=(-200,300))
     for (col,(img,ttl)) in enumerate(((recmap[:,:,1],"f_w"),(recmap[:,:,2],"f_l"),(recmap[:,:,3],"f_p")))
         ax2=CM.Axis(f[1,col+1];title=ttl,aspect=CM.DataAspect(),yreversed=true); CM.hidedecorations!(ax2); CM.heatmap!(ax2,img;colormap=:jet,colorrange=(0,1))
     end
@@ -621,7 +689,7 @@ end
 
 # ╔═╡ aaaa0022-0000-4000-8000-000000000022
 let f=CM.Figure(size=(1520,430))
-    ax=CM.Axis(f[1,1];title="VMI $(Int(E70)) keV (sector)",aspect=CM.DataAspect(),yreversed=true); CM.hidedecorations!(ax); CM.heatmap!(ax,smap70;colormap=:grays,colorrange=(-200,300))
+    ax=CM.Axis(f[1,1];title="VMI $(Int(EHI)) keV (sector)",aspect=CM.DataAspect(),yreversed=true); CM.hidedecorations!(ax); CM.heatmap!(ax,smap_hi;colormap=:grays,colorrange=(-200,300))
     for (col,(img,ttl)) in enumerate(((sect.rec[:,:,1],"f_w"),(sect.rec[:,:,2],"f_l"),(sect.rec[:,:,3],"f_p")))
         ax2=CM.Axis(f[1,col+1];title=ttl,aspect=CM.DataAspect(),yreversed=true); CM.hidedecorations!(ax2); CM.heatmap!(ax2,img;colormap=:jet,colorrange=(0,1))
     end
@@ -681,9 +749,9 @@ Markdown.parse("""
 | f_lipid | $(round(ml.ccc,digits=3)) | $(round(ml.slope,digits=2)) | $(round(ml.rmse,digits=3)) |
 | f_protein | $(round(mp.ccc,digits=3)) | $(round(mp.slope,digits=2)) | $(round(mp.rmse,digits=3)) |
 
-Held-out **circular + sector** (n=$(length(allrois))). Detectability: **$(round(Int,100mean(dHU70.<5)))% of ROIs < 5 HU at $(Int(E70)) keV** (mean $(round(mean(dHU70),digits=1)) HU).
+Held-out **circular + sector** (n=$(length(allrois))). Detectability: **$(round(Int,100mean(dHU_hi.<5)))% of ROIs < 5 HU at $(Int(EHI)) keV** (mean $(round(mean(dHU_hi),digits=1)) HU).
 
-**keV pair — $(Int(E40))/$(Int(E70)).** This pair is intentionally ill-conditioned (150 keV is a clinically
+**keV pair — $(Int(ELO))/$(Int(EHI)).** This pair is intentionally ill-conditioned (150 keV is a clinically
 standard VMI, but the two energies sit above the photoelectric-rich low-keV regime): the W/L/P triangle is a
 near-collinear sliver, **cond(G) = $(round(cond([PL[1]-PW[1] PP[1]-PW[1]; PL[2]-PW[2] PP[2]-PW[2]]),digits=1))**
 (≈3.5× a low-keV pair). Yet the held-out **ROI CCC is unaffected** — the √N eroded-core pooling absorbs the
@@ -705,74 +773,6 @@ integrated-HU fixes the *numerator* (total lipid) — a region *mean* still need
 local background must be a field (not a constant) because PVAT muscle isn't uniform; and conservation is exact
 only for linear/FBP recon, so a clinical DLIR/QIR transfer must re-earn it empirically.
 """)
-
-# ╔═╡ aaaa0027-0000-4000-8000-000000000027
-# One-click product: apply the fitted model to ANY co-registered VMI pair from the same 70/150-keV
-# chain → (f_w, f_l, f_p) maps. No external file, no re-fit — the model IS the live fitted globals
-# (cw,cl,cp,cl_aff, sc40,sc70, ρ, the soft-tissue gate); this reuses the delivered-map pipeline
-# (fullfield · sigma_f_weight · tv_coupled) verbatim, so the product and the validation share one method.
-begin
-    # tv=true → boundary-agnostic delivered map (2D slice); tv=false → raw per-voxel decode (any dim).
-    function wlp_apply(vmi_low, vmi_high; tv=true)
-        fw, fl, fp = fullfield(vmi_low, vmi_high)
-        tv || return (fw, fl, fp)
-        gate = .!isnan.(fl); w = sigma_f_weight(vmi_low, vmi_high)
-        fl_tv, fp_tv = tv_coupled(fl, fp, gate; lambda=0.05, iters=25, eps=0.04, w=w)
-        fw_tv = map((a, b) -> isnan(a) ? NaN : 1 - a - b, fl_tv, fp_tv)
-        (fw_tv, fl_tv, fp_tv)
-    end
-    let  # invariant: on the cached delivered-map slice, wlp_apply must reproduce the notebook's delivered map
-        fw, fl, fp = wlp_apply(map40, map70)
-        @assert isequal(cat(fw, fl, fp; dims=3), recmap) "wlp_apply must reproduce the delivered map"
-        ng = count(!isnan, fl); lo, hi = extrema(filter(!isnan, fl))
-        Markdown.parse("**One-click apply** — `fw, fl, fp = wlp_apply(vmi_low, vmi_high)` on a co-registered $(Int(E40))/$(Int(E70)) keV VMI pair. Reproduces the delivered map bit-for-bit on the cached slice: $ng gated voxels, f_l ∈ [$(round(lo,digits=2)), $(round(hi,digits=2))].")
-    end
-end
-
-# ╔═╡ aaaa0028-0000-4000-8000-000000000028
-# Raw export: dump every CT scan as an ImageJ-openable .raw (full 512×512×3 z-stack), grouped by role
-# into data/recon/{calibration,test}/, with per-label truth in label_comps.csv. Reuses the LIVE sim
-# arrays (no .jls re-read). Column-major Float32/UInt8, little-endian, NOT dim2-reversed (figures use
-# yreversed=true ⇒ ImageJ row 0 = top). Circular sims share the calibration label stack.
-let
-    RECON = joinpath(@__DIR__, "data", "recon")
-    dims3(M) = "$(size(M,1))x$(size(M,2))x$(size(M,3))"
-    wf32(dir, base, kev, M) = write(joinpath(dir, "$(base)_vmi$(kev)keV_$(dims3(M))_float32.raw"), Array{Float32}(M))
-    wu8(dir, base, M)       = write(joinpath(dir, "$(base)_$(dims3(M))_uint8.raw"), Array{UInt8}(M))
-    scan(dir, base, h40, h70) = (wf32(dir, base, Int(E40), h40); wf32(dir, base, Int(E70), h70))
-    comps_csv(dir, rows) = open(joinpath(dir, "label_comps.csv"), "w") do io
-        println(io, "scan,label,f_water,f_lipid,f_protein")
-        for (name, comps) in rows, (k, c) in enumerate(comps)
-            @printf(io, "%s,%d,%.4f,%.4f,%.4f\n", name, ROD0 - 1 + k, c[1], c[2], c[3])
-        end
-    end
-    rm(RECON; recursive=true, force=true)
-    CAL = joinpath(RECON, "calibration"); TST = joinpath(RECON, "test"); mkpath(CAL); mkpath(TST)
-    NZ = size(map70v, 3)
-    crows = Tuple{String,Any}[]
-    for (i, s) in enumerate(calsims); scan(CAL, "noise_sim$i", s.hu40, s.hu70); push!(crows, ("noise_sim$i", s.comps)); end
-    scan(CAL, "deliveredmap", map40v, map70v); push!(crows, ("deliveredmap", mcomps))
-    wu8(CAL, "labels", repeat(map_m2, 1, 1, NZ)); comps_csv(CAL, crows)
-    trows = Tuple{String,Any}[]
-    for (i, s) in enumerate(testsims); scan(TST, "circular_sim$i", s.hu40, s.hu70); push!(trows, ("circular_sim$i", s.comps)); end
-    for (i, s) in enumerate(sectsims); scan(TST, "sector_sim$i", s.hu40, s.hu70); push!(trows, ("sector_sim$i", s.comps)); end
-    scan(TST, "sector_deliveredmap", smap40v, smap70v); push!(trows, ("sector_deliveredmap", scomps))
-    wu8(TST, "labels_circular", repeat(map_m2, 1, 1, NZ)); wu8(TST, "labels_sector", repeat(smap_m2, 1, 1, NZ)); comps_csv(TST, trows)
-    p = joinpath(CAL, "noise_sim1_vmi$(Int(E40))keV_512x512x$(NZ)_float32.raw")   # byte-layout round-trip
-    @assert reshape(reinterpret(Float32, read(p)), 512, 512, NZ) == Array{Float32}(calsims[1].hu40) "raw round-trip mismatch — byte layout wrong"
-    write(joinpath(RECON, "README_imagej.txt"), """
-ImageJ → File → Import → Raw…
-  Image type       = 32-bit Real  (*_float32.raw)   |   8-bit  (*_labels*_uint8.raw)
-  Width = nx, Height = ny, Number of images = nz (= $(NZ))   ·   ☑ Little-endian byte order
-Column-major, NOT dim2-reversed (notebook figures use yreversed=true ⇒ ImageJ row 0 = top).
-calibration/: noise_sim1..$(length(calsims)) + deliveredmap ; labels = shared insert stack (8..20).
-test/:  circular_sim1..$(length(testsims)) · sector_sim1..$(length(sectsims)) + sector_deliveredmap
-        labels_circular (8..20) · labels_sector (8..23).
-VMI keV pair: $(Int(E40)) / $(Int(E70)).  label_comps.csv (per folder) → each scan's per-label
-(f_water, f_lipid, f_protein) ground truth.
-""")
-    Markdown.parse("**Raws exported** → `data/recon/` — calibration: $(2*(length(calsims)+1)) scans, test: $(2*(length(testsims)+length(sectsims)+1)) scans (ImageJ 32-bit, little-endian, $(NZ)-slice stacks). Layout in `README_imagej.txt`.")
-end
 
 # ╔═╡ Cell order:
 # ╟─aaaa0002-0000-4000-8000-000000000002
@@ -803,5 +803,3 @@ end
 # ╠═aaaa0023-0000-4000-8000-000000000023
 # ╠═aaaa0024-0000-4000-8000-000000000024
 # ╟─aaaa0025-0000-4000-8000-000000000025
-# ╠═aaaa0027-0000-4000-8000-000000000027
-# ╠═aaaa0028-0000-4000-8000-000000000028
