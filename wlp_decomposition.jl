@@ -747,12 +747,12 @@ begin
 
     _dccc=rs[i2_ship].m[2].ccc-rs[1].m[2].ccc; _dslope=rs[i2_ship].m[2].slope-rs[1].m[2].slope
     _drmse=rs[i2_ship].m[2].rmse-rs[1].m[2].rmse
-    _verdict = "At the **shipped** λ=$(TV_LAMBDA)/`:$(TV_SIMPLEX)`, f\\_l CCC moves $(_dccc≥0 ? "+" : "")$(round(_dccc,digits=4)) vs raw, slope $(_dslope≥0 ? "+" : "")$(round(_dslope,digits=3)), RMSE $(_drmse≥0 ? "+" : "")$(round(_drmse,digits=4)) — " *
-        (abs(_dccc)<0.002 ? "**ROI-level accuracy is unchanged**. That is the whole point: ROI-averaging had already removed this noise, so a correctly-scheduled TV costs nothing here while transforming the map." :
+    _verdict = "At the **shipped** λ=$(TV_LAMBDA)/`:$(TV_SIMPLEX)`, f\\_l CCC moves $(_dccc≥0 ? "+" : "")$(round(_dccc,digits=5)) vs raw and RMSE $(_drmse≥0 ? "+" : "")$(round(_drmse,digits=4)) — " *
+        (abs(_dccc)<0.002 ? "**ROI-level accuracy is unchanged** (slope $(round(rs[i2_ship].m[2].slope,digits=3)) vs $(round(rs[1].m[2].slope,digits=3)) raw — both within $(round(Int,100*max(abs(1-rs[i2_ship].m[2].slope),abs(1-rs[1].m[2].slope))))% of unity). That is the whole point: ROI-averaging had already removed this noise, so a correctly-scheduled TV costs nothing here while transforming the map." :
          _dccc<0 ? "**TV measurably costs ROI-level accuracy.** Do not ship this λ on the strength of the map alone." :
          "TV *improves* even the ROI-level accuracy.") *
-        " Note λ=$(LAM_BEST) is the per-voxel argmin but is **not** what ships: it buys map smoothness with $(round(rs[i2_best].m[2].slope,digits=3)) slope vs $(round(rs[i2_ship].m[2].slope,digits=3)) at λ=$(TV_LAMBDA). λ=$(TV_LAMBDA) is the Pareto point — most of the per-voxel gain, none of the ROI bias." *
-        " The failure mode to watch is **slope < 1** (contrast shrinkage): at λ=100 slope=$(round(rs[end].m[2].slope,digits=3)), CCC=$(round(rs[end].m[2].ccc,digits=4))."
+        " λ=$(LAM_BEST) is the per-voxel argmin but is **not** what ships: at ROI level it costs **$(round(Int,100*(rs[i2_best].m[2].rmse/rs[i2_ship].m[2].rmse-1)))% more f\\_l RMSE** ($(round(rs[i2_best].m[2].rmse,digits=4)) vs $(round(rs[i2_ship].m[2].rmse,digits=4))) and CCC $(round(rs[i2_best].m[2].ccc,digits=4)) vs $(round(rs[i2_ship].m[2].ccc,digits=4)), to buy per-voxel map RMSE $(round(rms3(swp_c[i_best]),digits=4)) vs $(round(rms3(swp_c[i_ship]),digits=4)). λ=$(TV_LAMBDA) is the Pareto point: most of the map gain, no ROI cost." *
+        " Watch **slope < 1** (contrast shrinkage) as λ grows: λ=100 → slope $(round(rs[end].m[2].slope,digits=3)), CCC $(round(rs[end].m[2].ccc,digits=4)), RMSE $(round(rs[end].m[2].rmse,digits=4))."
     @printf("NOISE  σ_lo=%.1f σ_hi=%.1f HU | skew %+.2f/%+.2f exkurt %+.2f/%+.2f ⇒ %s | ACF lag1 x=%.2f y=%.2f ⇒ %.1f vox/indep sample | ρ(lo,hi)=%.2f\n",
         nz_lo.sd,nz_hi.sd,nz_lo.skew,nz_hi.skew,nz_lo.exkurt,nz_hi.exkurt,
         (abs(nz_lo.skew)<0.2 && abs(nz_lo.exkurt)<0.5) ? "Gaussian" : "NOT Gaussian",acf_x[2],acf_y[2],acf_len,ρ)
@@ -823,9 +823,10 @@ begin
             "gate" => Dict("soft_hu_lo"=>SOFT_HU_LO, "soft_hu_hi"=>SOFT_HU_HI),
             # TV belongs in the snapshot: wlp_apply denoises by default, so a consumer without these
             # reproduces a different map. λ is weighed against w=1/σ_f², hence O(10), not O(0.01).
-            "tv" => Dict("lambda"=>TV_LAMBDA, "iters"=>TV_ITERS, "eps"=>TV_EPS,
+            "tv" => Dict("lambda"=>TV_LAMBDA, "iters"=>TV_ITERS, "eps"=>TV_EPS, "simplex"=>String(TV_SIMPLEX),
                 "form"=>"coupled Huber-TV on (f_l,f_p); den = w + Σ_nbr λ/max(‖∇f‖,eps), w = 1/σ_f²",
-                "lambda_selected_by"=>"argmin per-voxel RMSE vs GT on circular calibration geometry (see λ sweep cell)"),
+                "simplex_note"=>"project onto {f≥0, f_l+f_p≤1} ONCE on the result, never per sweep: per-sweep rectification is a Jensen bias on any region mean drawn from the map",
+                "lambda_selected_by"=>"Pareto: per-voxel RMSE vs GT swept 0-100 on the circular calibration geometry, then held to the largest λ with no ROI-level cost (see λ sweep cell)"),
             "provenance" => Dict("source"=>"wlp_decomposition.jl",
                 "chain"=>"80/140kVp EICT (:dd_fast) -> Cong water/iodine -> FBP $(RECON_N)px/$(Int(RECON_FOV_MM))mm -> VMI $(PTAG) keV; stadium QRM-thorax",
                 "cal_n"=>length(calrois), "r2_fw_fit"=>r2fit(cw,fwc), "test_n"=>length(drois),
@@ -993,7 +994,7 @@ let f=CM.Figure(size=(1520,430))
         ax2=CM.Axis(f[1,col+1];title=ttl,aspect=CM.DataAspect(),yreversed=true); CM.hidedecorations!(ax2); CM.heatmap!(ax2,img;colormap=:jet,colorrange=(0,1))
     end
     CM.Colorbar(f[1,5];colormap=:jet,colorrange=(0,1),label="volume fraction")
-    CM.Label(f[0,:],"Delivered map — per-voxel decode + σ_f-weighted Huber-TV, boundary-agnostic (lung & bone HU-gated out)";fontsize=13,font=:bold)
+    CM.Label(f[0,:],"Delivered map — per-voxel decode + σ_f-weighted Huber-TV (λ=$(TV_LAMBDA), simplex=:$(TV_SIMPLEX)), boundary-agnostic (lung & bone HU-gated out)";fontsize=13,font=:bold)
     safe_save(joinpath(ASSET,"fig3_delivered_map.png"),f); f
 end
 
@@ -1042,7 +1043,7 @@ let f=CM.Figure(size=(1520,430))
         ax2=CM.Axis(f[1,col+1];title=ttl,aspect=CM.DataAspect(),yreversed=true); CM.hidedecorations!(ax2); CM.heatmap!(ax2,img;colormap=:jet,colorrange=(0,1))
     end
     CM.Colorbar(f[1,5];colormap=:jet,colorrange=(0,1),label="volume fraction")
-    CM.Label(f[0,:],"Delivered map — sector validation phantom (per-voxel decode + σ_f Huber-TV, boundary-agnostic)";fontsize=13,font=:bold)
+    CM.Label(f[0,:],"Delivered map — sector validation phantom (per-voxel decode + σ_f Huber-TV λ=$(TV_LAMBDA), simplex=:$(TV_SIMPLEX), boundary-agnostic)";fontsize=13,font=:bold)
     safe_save(joinpath(ASSET,"fig7_delivered_map_sector.png"),f); f
 end
 
