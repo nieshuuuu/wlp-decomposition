@@ -1,10 +1,11 @@
 [provenance]
-test_ccc = [0.9955952483652712, 0.9969833660076765, 0.9984312491824985]
+test_ccc = [0.9956308588132271, 0.9969706595081688, 0.9980000465203323]
 source = "wlp_decomposition.jl"
-test_rmse = [0.023258958053683502, 0.0188767579711701, 0.004991558734118255]
+test_rmse = [0.02279056363565261, 0.018658266237535907, 0.0055586530693329805]
 chain = "80/140kVp EICT (:dd_fast) -> Cong water/iodine -> FBP 512px/380mm -> VMI 70_150 keV; stadium QRM-thorax"
 r2_fw_fit = 0.996394848687462
 test_n = 129
+test_slope = [0.9763547826917265, 0.9869700450948395, 0.9671652930368989]
 cal_n = 52
 
 [calibration_table]
@@ -23,10 +24,12 @@ E_high_keV = 150.0
 
 [tv]
 eps = 0.04
-lambda_selected_by = "argmin per-voxel RMSE vs GT on circular calibration geometry (see λ sweep cell)"
-lambda = 10.0
+lambda_selected_by = "Pareto: per-voxel RMSE vs GT swept 0-100 on the circular calibration geometry, then held to the largest λ with no ROI-level cost (see λ sweep cell)"
+lambda = 3.0
+simplex = "once"
 iters = 25
 form = "coupled Huber-TV on (f_l,f_p); den = w + Σ_nbr λ/max(‖∇f‖,eps), w = 1/σ_f²"
+simplex_note = "project onto {f≥0, f_l+f_p≤1} ONCE on the result, never per sweep: per-sweep rectification is a Jensen bias on any region mean drawn from the map"
 
 [gate]
 soft_hu_hi = 250.0
