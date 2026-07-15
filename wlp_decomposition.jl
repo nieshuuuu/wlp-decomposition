@@ -514,9 +514,9 @@ begin
             d=decode(Float64(h_lo[I]),Float64(h_hi[I])); fw[I]=d[1];fl[I]=d[2];fp[I]=d[3]; end
         (fw,fl,fp)
     end
-    function deliver(m_lo,m_hi,m2,comps)
+    function deliver(m_lo,m_hi,m2,comps; lambda=TV_LAMBDA, simplex=TV_SIMPLEX)
         f0=fullfield(m_lo,m_hi); gate=.!isnan.(f0[2]); w=sigma_f_weight(m_lo,m_hi)
-        fl_tv,fp_tv=tv_coupled(f0[2],f0[3],gate; w=w)
+        fl_tv,fp_tv=tv_coupled(f0[2],f0[3],gate; lambda=lambda,w=w,simplex=simplex)
         fw_tv=map((a,b)-> isnan(a) ? NaN : 1-a-b, fl_tv, fp_tv)
         rec=cat(fw_tv,fl_tv,fp_tv;dims=3); tru=fill(NaN,size(m2)...,3); recgt=fill(NaN,size(m2)...,3)
         for k in 1:length(comps); lab=ROD0-1+k
@@ -804,6 +804,41 @@ $(_clamp_verdict)
 **Why the correlation doesn't need its own model.** ≈$(round(acf_len,digits=1)) voxels per independent sample means the per-voxel w overstates the data's information by ≈$(round(acf_len,digits=1))×. That is a near-constant factor across the field — a global property of the scan geometry, not of any voxel — so it rescales w uniformly and the GT-scored λ absorbs it whole. An explicit correlated-noise model would buy a reparameterisation, not accuracy. It would start to matter if the correlation length varied spatially (a dense implant streaking one region).""")
 end
 
+# ╔═╡ aaaa0032-0000-4000-8000-000000000032
+# λ side-by-side: what SHIPS (TV_LAMBDA) vs the per-voxel argmin (LAM_BEST, taken from the sweep —
+# not typed in, so this figure follows the data). Both panels run the real `deliver` path; only λ
+# differs. GT is shown alongside because the question "which λ" is settled against truth, not by eye.
+begin
+    circ_alt = deliver(map_lo,map_hi,map_m2,mcomps; lambda=LAM_BEST)
+    sect_alt = deliver(smap_lo,smap_hi,smap_m2,scomps; lambda=LAM_BEST)
+    function pv_stats(rec,m2,comps,rpx)                      # per-voxel f_l vs GT on the eroded cores
+        t=Float64[];r=Float64[];sds=Float64[]
+        for k in 1:length(comps); ci=core_idx(m2,ROD0-1+k,rpx); isempty(ci)&&continue
+            v=[rec[I,2] for I in ci if isfinite(rec[I,2])]; isempty(v)&&continue
+            append!(t,fill(comps[k][2],length(v))); append!(r,v); push!(sds,std(v))
+        end
+        (rmse=sqrt(mean((r.-t).^2)), sd=mean(sds))
+    end
+    LROWS=((circ,circ_alt,map_m2,mcomps,CORE_RPX,"circular"),(sect,sect_alt,smap_m2,scomps,7,"sector"))
+    let f=CM.Figure(size=(1180,780))
+        for (row,(D,A,m2,comps,rpx,nm)) in enumerate(LROWS)
+            hi=findall(!isnan,D.tru[:,:,2]); ci=extrema(getindex.(hi,1)); cj=extrema(getindex.(hi,2)); pad=18
+            rI=max(1,ci[1]-pad):min(size(m2,1),ci[2]+pad); rJ=max(1,cj[1]-pad):min(size(m2,2),cj[2]+pad)
+            sD=pv_stats(D.rec,m2,comps,rpx); sA=pv_stats(A.rec,m2,comps,rpx)
+            _st(st)= st===nothing ? "" : @sprintf("\nper-voxel RMSE %.4f · within-core sd %.4f",st.rmse,st.sd)
+            for (col,(img,ttl,st)) in enumerate(((D.tru[rI,rJ,2],"$nm · true f_l",nothing),
+                                                 (D.rec[rI,rJ,2],"λ=$(TV_LAMBDA) — ships",sD),
+                                                 (A.rec[rI,rJ,2],"λ=$(LAM_BEST) — per-voxel argmin",sA)))
+                ax=CM.Axis(f[row,col];title=ttl*_st(st),titlesize=11,aspect=CM.DataAspect(),yreversed=true)
+                CM.hidedecorations!(ax); hm=CM.heatmap!(ax,img;colormap=:jet,colorrange=(0,1))
+                (row==1&&col==3) && CM.Colorbar(f[:,4],hm;label="f_l")
+            end
+        end
+        CM.Label(f[0,:],"f_l delivered map — shipped λ=$(TV_LAMBDA) vs per-voxel argmin λ=$(LAM_BEST) (σ_f Huber-TV, simplex=:$(TV_SIMPLEX))\nλ=$(LAM_BEST) is the smoother map, but at ROI level it costs f_l RMSE $(round(rs[i2_best].m[2].rmse,digits=4)) vs $(round(rs[i2_ship].m[2].rmse,digits=4)) and CCC $(round(rs[i2_best].m[2].ccc,digits=4)) vs $(round(rs[i2_ship].m[2].ccc,digits=4)) — the trade, not a free win";fontsize=12,font=:bold)
+        safe_save(joinpath(ASSET,"fig10_lambda_compare.png"),f); f
+    end
+end
+
 # ╔═╡ aaaa0026-0000-4000-8000-000000000026
 # Portable model snapshot — dumps the fitted surface + noise + gate + calibration table to
 # wlp_model_<pair>.toml (stdlib TOML, no BasisSimulator), so the model can be applied outside
@@ -1009,6 +1044,58 @@ let f=CM.Figure(size=(1250,440))
     safe_save(joinpath(ASSET,"fig4_honest_vs_pooled.png"),f); f
 end
 
+# ╔═╡ aaaa0023-0000-4000-8000-000000000023
+# GT vs recovered (jet 0–1) vs signed error (blue–white–red diverging, own colorbar) for ALL THREE materials.
+# Circular phantom.
+let f=CM.Figure(size=(1320,1050)), Dl=circ
+    hi=findall(!isnan,Dl.tru[:,:,2]); ci=extrema(getindex.(hi,1)); cj=extrema(getindex.(hi,2)); pad=25
+    rI=max(1,ci[1]-pad):min(size(Dl.tru,1),ci[2]+pad); rJ=max(1,cj[1]-pad):min(size(Dl.tru,2),cj[2]+pad)
+    for (row,mat) in enumerate(("f_w","f_l","f_p"))
+        tl=Dl.tru[rI,rJ,row]; rf=Dl.rec[rI,rJ,row]
+        rl=[isnan(tl[i,j]) ? NaN : rf[i,j] for i in axes(tl,1),j in axes(tl,2)]
+        er=[isnan(tl[i,j]) ? NaN : rf[i,j]-tl[i,j] for i in axes(tl,1),j in axes(tl,2)]
+        for (col,(img,ttl,cm,cr)) in enumerate(((tl,"true",:jet,(0,1)),(rl,"recovered",:jet,(0,1)),(er,"error",CM.Reverse(:RdBu),(-0.3,0.3))))
+            ax=CM.Axis(f[row,col];title=(row==1 ? ttl : ""),ylabel=(col==1 ? mat : ""),aspect=CM.DataAspect(),yreversed=true)
+            CM.hidedecorations!(ax;label=false); CM.heatmap!(ax,img;colormap=cm,colorrange=cr)
+        end
+    end
+    CM.Colorbar(f[:,4];colormap=:jet,colorrange=(0,1),label="fraction (true / recovered)")
+    CM.Colorbar(f[:,5];colormap=CM.Reverse(:RdBu),colorrange=(-0.3,0.3),label="error (recovered − true)")
+    CM.Label(f[0,:],"Circular phantom — true & recovered (jet 0–1) vs error (blue–white–red), f_w / f_l / f_p";fontsize=13,font=:bold)
+    safe_save(joinpath(ASSET,"fig8_gt_rec_error_circular.png"),f); f
+end
+
+# ╔═╡ aaaa0022-0000-4000-8000-000000000022
+let f=CM.Figure(size=(1520,430))
+    ax=CM.Axis(f[1,1];title="VMI $(Int(EHI)) keV (sector)",aspect=CM.DataAspect(),yreversed=true); CM.hidedecorations!(ax); CM.heatmap!(ax,smap_hi;colormap=:grays,colorrange=(-200,300))
+    for (col,(img,ttl)) in enumerate(((sect.rec[:,:,1],"f_w"),(sect.rec[:,:,2],"f_l"),(sect.rec[:,:,3],"f_p")))
+        ax2=CM.Axis(f[1,col+1];title=ttl,aspect=CM.DataAspect(),yreversed=true); CM.hidedecorations!(ax2); CM.heatmap!(ax2,img;colormap=:jet,colorrange=(0,1))
+    end
+    CM.Colorbar(f[1,5];colormap=:jet,colorrange=(0,1),label="volume fraction")
+    CM.Label(f[0,:],"Delivered map — sector validation phantom (per-voxel decode + σ_f Huber-TV λ=$(TV_LAMBDA), simplex=:$(TV_SIMPLEX), boundary-agnostic)";fontsize=13,font=:bold)
+    safe_save(joinpath(ASSET,"fig7_delivered_map_sector.png"),f); f
+end
+
+# ╔═╡ aaaa0024-0000-4000-8000-000000000024
+# Same triad for the SECTOR validation phantom (held-out shape).
+let f=CM.Figure(size=(1320,1050)), Dl=sect
+    hi=findall(!isnan,Dl.tru[:,:,2]); ci=extrema(getindex.(hi,1)); cj=extrema(getindex.(hi,2)); pad=25
+    rI=max(1,ci[1]-pad):min(size(Dl.tru,1),ci[2]+pad); rJ=max(1,cj[1]-pad):min(size(Dl.tru,2),cj[2]+pad)
+    for (row,mat) in enumerate(("f_w","f_l","f_p"))
+        tl=Dl.tru[rI,rJ,row]; rf=Dl.rec[rI,rJ,row]
+        rl=[isnan(tl[i,j]) ? NaN : rf[i,j] for i in axes(tl,1),j in axes(tl,2)]
+        er=[isnan(tl[i,j]) ? NaN : rf[i,j]-tl[i,j] for i in axes(tl,1),j in axes(tl,2)]
+        for (col,(img,ttl,cm,cr)) in enumerate(((tl,"true",:jet,(0,1)),(rl,"recovered",:jet,(0,1)),(er,"error",CM.Reverse(:RdBu),(-0.3,0.3))))
+            ax=CM.Axis(f[row,col];title=(row==1 ? ttl : ""),ylabel=(col==1 ? mat : ""),aspect=CM.DataAspect(),yreversed=true)
+            CM.hidedecorations!(ax;label=false); CM.heatmap!(ax,img;colormap=cm,colorrange=cr)
+        end
+    end
+    CM.Colorbar(f[:,4];colormap=:jet,colorrange=(0,1),label="fraction (true / recovered)")
+    CM.Colorbar(f[:,5];colormap=CM.Reverse(:RdBu),colorrange=(-0.3,0.3),label="error (recovered − true)")
+    CM.Label(f[0,:],"Sector phantom — true & recovered (jet 0–1) vs error (blue–white–red), f_w / f_l / f_p";fontsize=13,font=:bold)
+    safe_save(joinpath(ASSET,"fig9_gt_rec_error_sector.png"),f); f
+end
+
 # ╔═╡ aaaa0020-0000-4000-8000-000000000020
 let f=CM.Figure(size=(1300,460))
     for (col,(t,p,mt,sem,nm)) in enumerate(((tfw,pfw,mw,semfw,"f_w"),(tfl,pfl,ml,semfl,"f_l"),(tfp,pfp,mp,semfp,"f_p")))
@@ -1034,58 +1121,6 @@ let f=CM.Figure(size=(1250,470)), rr=[r.r for r in integ]
     CM.hlines!(ax2,[1.0];color=:gray,linestyle=:dash); CM.vlines!(ax2,[FIXED_MARGIN_PX];color=(:black,0.3),linestyle=:dot); CM.axislegend(ax2;position=:rb)
     CM.Label(f[0,:],"Partial volume makes the object-extent measure under-report small fat; integrated-HU recovers it via conservation (bg = local muscle)";fontsize=12,font=:bold)
     safe_save(joinpath(ASSET,"fig6_integrated_hu.png"),f); f
-end
-
-# ╔═╡ aaaa0022-0000-4000-8000-000000000022
-let f=CM.Figure(size=(1520,430))
-    ax=CM.Axis(f[1,1];title="VMI $(Int(EHI)) keV (sector)",aspect=CM.DataAspect(),yreversed=true); CM.hidedecorations!(ax); CM.heatmap!(ax,smap_hi;colormap=:grays,colorrange=(-200,300))
-    for (col,(img,ttl)) in enumerate(((sect.rec[:,:,1],"f_w"),(sect.rec[:,:,2],"f_l"),(sect.rec[:,:,3],"f_p")))
-        ax2=CM.Axis(f[1,col+1];title=ttl,aspect=CM.DataAspect(),yreversed=true); CM.hidedecorations!(ax2); CM.heatmap!(ax2,img;colormap=:jet,colorrange=(0,1))
-    end
-    CM.Colorbar(f[1,5];colormap=:jet,colorrange=(0,1),label="volume fraction")
-    CM.Label(f[0,:],"Delivered map — sector validation phantom (per-voxel decode + σ_f Huber-TV λ=$(TV_LAMBDA), simplex=:$(TV_SIMPLEX), boundary-agnostic)";fontsize=13,font=:bold)
-    safe_save(joinpath(ASSET,"fig7_delivered_map_sector.png"),f); f
-end
-
-# ╔═╡ aaaa0023-0000-4000-8000-000000000023
-# GT vs recovered (jet 0–1) vs signed error (blue–white–red diverging, own colorbar) for ALL THREE materials.
-# Circular phantom.
-let f=CM.Figure(size=(1320,1050)), Dl=circ
-    hi=findall(!isnan,Dl.tru[:,:,2]); ci=extrema(getindex.(hi,1)); cj=extrema(getindex.(hi,2)); pad=25
-    rI=max(1,ci[1]-pad):min(size(Dl.tru,1),ci[2]+pad); rJ=max(1,cj[1]-pad):min(size(Dl.tru,2),cj[2]+pad)
-    for (row,mat) in enumerate(("f_w","f_l","f_p"))
-        tl=Dl.tru[rI,rJ,row]; rf=Dl.rec[rI,rJ,row]
-        rl=[isnan(tl[i,j]) ? NaN : rf[i,j] for i in axes(tl,1),j in axes(tl,2)]
-        er=[isnan(tl[i,j]) ? NaN : rf[i,j]-tl[i,j] for i in axes(tl,1),j in axes(tl,2)]
-        for (col,(img,ttl,cm,cr)) in enumerate(((tl,"true",:jet,(0,1)),(rl,"recovered",:jet,(0,1)),(er,"error",CM.Reverse(:RdBu),(-0.3,0.3))))
-            ax=CM.Axis(f[row,col];title=(row==1 ? ttl : ""),ylabel=(col==1 ? mat : ""),aspect=CM.DataAspect(),yreversed=true)
-            CM.hidedecorations!(ax;label=false); CM.heatmap!(ax,img;colormap=cm,colorrange=cr)
-        end
-    end
-    CM.Colorbar(f[:,4];colormap=:jet,colorrange=(0,1),label="fraction (true / recovered)")
-    CM.Colorbar(f[:,5];colormap=CM.Reverse(:RdBu),colorrange=(-0.3,0.3),label="error (recovered − true)")
-    CM.Label(f[0,:],"Circular phantom — true & recovered (jet 0–1) vs error (blue–white–red), f_w / f_l / f_p";fontsize=13,font=:bold)
-    safe_save(joinpath(ASSET,"fig8_gt_rec_error_circular.png"),f); f
-end
-
-# ╔═╡ aaaa0024-0000-4000-8000-000000000024
-# Same triad for the SECTOR validation phantom (held-out shape).
-let f=CM.Figure(size=(1320,1050)), Dl=sect
-    hi=findall(!isnan,Dl.tru[:,:,2]); ci=extrema(getindex.(hi,1)); cj=extrema(getindex.(hi,2)); pad=25
-    rI=max(1,ci[1]-pad):min(size(Dl.tru,1),ci[2]+pad); rJ=max(1,cj[1]-pad):min(size(Dl.tru,2),cj[2]+pad)
-    for (row,mat) in enumerate(("f_w","f_l","f_p"))
-        tl=Dl.tru[rI,rJ,row]; rf=Dl.rec[rI,rJ,row]
-        rl=[isnan(tl[i,j]) ? NaN : rf[i,j] for i in axes(tl,1),j in axes(tl,2)]
-        er=[isnan(tl[i,j]) ? NaN : rf[i,j]-tl[i,j] for i in axes(tl,1),j in axes(tl,2)]
-        for (col,(img,ttl,cm,cr)) in enumerate(((tl,"true",:jet,(0,1)),(rl,"recovered",:jet,(0,1)),(er,"error",CM.Reverse(:RdBu),(-0.3,0.3))))
-            ax=CM.Axis(f[row,col];title=(row==1 ? ttl : ""),ylabel=(col==1 ? mat : ""),aspect=CM.DataAspect(),yreversed=true)
-            CM.hidedecorations!(ax;label=false); CM.heatmap!(ax,img;colormap=cm,colorrange=cr)
-        end
-    end
-    CM.Colorbar(f[:,4];colormap=:jet,colorrange=(0,1),label="fraction (true / recovered)")
-    CM.Colorbar(f[:,5];colormap=CM.Reverse(:RdBu),colorrange=(-0.3,0.3),label="error (recovered − true)")
-    CM.Label(f[0,:],"Sector phantom — true & recovered (jet 0–1) vs error (blue–white–red), f_w / f_l / f_p";fontsize=13,font=:bold)
-    safe_save(joinpath(ASSET,"fig9_gt_rec_error_sector.png"),f); f
 end
 
 # ╔═╡ aaaa0025-0000-4000-8000-000000000025
@@ -1152,17 +1187,18 @@ only for linear/FBP recon, so a clinical DLIR/QIR transfer must re-earn it empir
 # ╟─aaaa0013-0000-4000-8000-000000000013
 # ╠═aaaa0014-0000-4000-8000-000000000014
 # ╠═aaaa0031-0000-4000-8000-000000000031
+# ╠═aaaa0032-0000-4000-8000-000000000032
 # ╠═aaaa0026-0000-4000-8000-000000000026
 # ╠═aaaa0027-0000-4000-8000-000000000027
 # ╠═aaaa0028-0000-4000-8000-000000000028
 # ╟─aaaa0015-0000-4000-8000-000000000015
-# ╠═aaaa0016-0000-4000-8000-000000000016
-# ╠═aaaa0017-0000-4000-8000-000000000017
-# ╠═aaaa0018-0000-4000-8000-000000000018
-# ╠═aaaa0019-0000-4000-8000-000000000019
-# ╠═aaaa0020-0000-4000-8000-000000000020
-# ╠═aaaa0021-0000-4000-8000-000000000021
-# ╠═aaaa0022-0000-4000-8000-000000000022
-# ╠═aaaa0023-0000-4000-8000-000000000023
-# ╠═aaaa0024-0000-4000-8000-000000000024
+# ╟─aaaa0016-0000-4000-8000-000000000016
+# ╟─aaaa0017-0000-4000-8000-000000000017
+# ╟─aaaa0018-0000-4000-8000-000000000018
+# ╟─aaaa0019-0000-4000-8000-000000000019
+# ╟─aaaa0023-0000-4000-8000-000000000023
+# ╟─aaaa0022-0000-4000-8000-000000000022
+# ╟─aaaa0024-0000-4000-8000-000000000024
+# ╟─aaaa0020-0000-4000-8000-000000000020
+# ╟─aaaa0021-0000-4000-8000-000000000021
 # ╟─aaaa0025-0000-4000-8000-000000000025
