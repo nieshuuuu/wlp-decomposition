@@ -500,15 +500,19 @@ begin
 
     # ── delivered map: per-voxel decode over gated soft tissue + σ_f-weighted edge-preserving Huber-TV ──
     const SOFT_HU_LO, SOFT_HU_HI = -300.0, 250.0
-    function sigma_f_weight(h_lo,h_hi)
-        w=fill(NaN,size(h_hi))
+    # Per-voxel variance of (f_l,f_p): the measured σ(HU) ladder pushed through the decode gradient
+    # (delta method), with the inter-energy correlation ρ. SURE needs the two components separately,
+    # so they are the SSoT here and the TV weight is derived from them rather than recomputed.
+    function sigma_f_var(h_lo,h_hi)
+        vl=fill(NaN,size(h_hi)); vp=fill(NaN,size(h_hi))
         for I in CartesianIndices(h_hi); (SOFT_HU_LO<h_hi[I]<SOFT_HU_HI)||continue
             hl=Float64(h_lo[I]);hh=Float64(h_hi[I]); sig_lo=quad_sigma(sc_lo,hl);sig_hi=quad_sigma(sc_hi,hh)
             g_lo_l=dot(cl,dpoly_lo(hl,hh));g_hi_l=dot(cl,dpoly_hi(hl,hh)); g_lo_p=dot(cp,dpoly_lo(hl,hh));g_hi_p=dot(cp,dpoly_hi(hl,hh))
-            vl=g_lo_l^2*sig_lo^2+g_hi_l^2*sig_hi^2+2ρ*g_lo_l*g_hi_l*sig_lo*sig_hi; vp=g_lo_p^2*sig_lo^2+g_hi_p^2*sig_hi^2+2ρ*g_lo_p*g_hi_p*sig_lo*sig_hi
-            w[I]=1.0/max(vl+vp,1e-6)
-        end; w
+            vl[I]=g_lo_l^2*sig_lo^2+g_hi_l^2*sig_hi^2+2ρ*g_lo_l*g_hi_l*sig_lo*sig_hi
+            vp[I]=g_lo_p^2*sig_lo^2+g_hi_p^2*sig_hi^2+2ρ*g_lo_p*g_hi_p*sig_lo*sig_hi
+        end; (vl=vl, vp=vp)
     end
+    sigma_f_weight(h_lo,h_hi)=(v=sigma_f_var(h_lo,h_hi); map((a,b)->1.0/max(a+b,1e-6), v.vl, v.vp))
     function fullfield(h_lo,h_hi)
         fw=fill(NaN,size(h_hi));fl=copy(fw);fp=copy(fw)
         for I in CartesianIndices(h_hi); (SOFT_HU_LO<h_hi[I]<SOFT_HU_HI)||continue
@@ -528,8 +532,9 @@ begin
         (cx=mean(getindex.(idx,1));cy=mean(getindex.(idx,2)); [I for I in idx if (I[1]-cx)^2+(I[2]-cy)^2≤rpx^2]))
     _midz(v)=size(v,3)÷2+1
     CALPREP=[(img=s, m2=map_m2, rpx=CORE_RPX, nins=NHEART,          # calibration scans share HEARTC geometry
-              P=(f0=fullfield(s.hu_lo[:,:,_midz(s.hu_lo)],s.hu_hi[:,:,_midz(s.hu_hi)]),
-                 w=sigma_f_weight(s.hu_lo[:,:,_midz(s.hu_lo)],s.hu_hi[:,:,_midz(s.hu_hi)])))
+              P=let lo=s.hu_lo[:,:,_midz(s.hu_lo)], hi=s.hu_hi[:,:,_midz(s.hu_hi)], v=sigma_f_var(lo,hi)
+                    (f0=fullfield(lo,hi), v=v, w=map((a,b)->1.0/max(a+b,1e-6), v.vl, v.vp))
+                end)
              for s in calsims]                                       # decode once; each λ only re-runs TV
     function cal_pv_rmse(lam; simplex=TV_SIMPLEX)                    # per-voxel RMSE vs GT, CALIBRATION only
         t=Float64[]; r=Float64[]
