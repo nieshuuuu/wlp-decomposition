@@ -676,6 +676,40 @@ begin
     # spend the held-out set on tuning and leave nothing honest to report. Sector only confirms.
     LAM_BEST=LAMS[argmin([rms3(s) for s in swp_c])]
     i_best=findfirst(==(LAM_BEST),LAMS)
+
+    # (5) Does TV move the HEADLINE stats? fig5 cannot say — it decodes raw core voxels and never
+    # sees the TV. So re-score fig5's OWN n=129 ROIs through the delivered (TV'd) map. The test sims
+    # keep their full images and every circular scan reuses map_m2's insert geometry (likewise
+    # sector/smap_m2 — only the comps differ per scan), so the same ROIs are recoverable from the map.
+    _mid(s)=size(s.hu_hi,3)÷2+1
+    SIMS=vcat([(img=s, m2=map_m2,  rpx=CORE_RPX, n=NHEART) for s in testsims],
+              [(img=s, m2=smap_m2, rpx=7,        n=NSECT)  for s in sectsims])
+    SIMP=[(; s..., P=prep(s.img.hu_lo[:,:,_mid(s.img)], s.img.hu_hi[:,:,_mid(s.img)])) for s in SIMS]
+    function roi_stats(lam)                              # → per-material metrics over all 129 ROIs
+        T=[Float64[] for _ in 1:3]; R=[Float64[] for _ in 1:3]
+        for s in SIMP
+            fl,fp = lam≤0 ? (s.P.f0[2],s.P.f0[3]) : tv_coupled(s.P.f0[2],s.P.f0[3],s.P.gate; lambda=lam,w=s.P.w)
+            fw=map((a,b)-> isnan(a) ? NaN : 1-a-b, fl,fp); F=(fw,fl,fp)
+            for k in 1:s.n; ci=core_idx(s.m2,ROD0-1+k,s.rpx); isempty(ci)&&continue
+                for c in 1:3
+                    v=[F[c][I] for I in ci if isfinite(F[c][I])]; isempty(v)&&continue
+                    push!(T[c],s.img.comps[k][c]); push!(R[c],mean(v))
+                end
+            end
+        end
+        (m=[metrics(T[c],R[c]) for c in 1:3], n=length(T[1]))
+    end
+    LAMS2=[0.0,0.05,3.0,10.0,30.0,100.0]                 # coarser: 6 λ × 9 sims of full-field TV
+    rs=[roi_stats(l) for l in LAMS2]
+    i2_best=findfirst(==(LAM_BEST),LAMS2)
+    _rows2=join(["| $(l==0 ? "0 (raw)" : string(l)) | $(round(rs[i].m[1].ccc,digits=4)) | $(round(rs[i].m[2].ccc,digits=4)) | $(round(rs[i].m[3].ccc,digits=4)) | $(round(rs[i].m[2].slope,digits=3)) | $(round(rs[i].m[2].r2,digits=4)) | $(round(rs[i].m[2].rmse,digits=4)) |$(l==LAM_BEST ? " ← **delivered**" : "")"
+                for (i,l) in enumerate(LAMS2)],"\n")
+    _dccc=rs[i2_best].m[2].ccc-rs[1].m[2].ccc; _dslope=rs[i2_best].m[2].slope-rs[1].m[2].slope
+    _verdict = "At the delivered λ=$(LAM_BEST), f\\_l CCC moves $(_dccc≥0 ? "**+" : "**")$(round(_dccc,digits=4))** vs raw and slope moves $(_dslope≥0 ? "+" : "")$(round(_dslope,digits=3)) — " *
+        (abs(_dccc)<0.002 ? "i.e. **the ROI-level accuracy is unchanged**. TV redistributes noise *within* a region and leaves its mean alone, which is exactly what a region-mean statistic measures. The map gets smooth; the ROI number does not notice." :
+         _dccc<0 ? "**TV measurably costs ROI-level accuracy** — the delivered map is smoother but less accurate at the region level. Do not ship this λ on the strength of the map alone." :
+         "TV also *improves* the ROI-level accuracy.") *
+        " The failure mode to watch is **slope < 1** (contrast shrinkage): at λ=100 slope=$(round(rs[end].m[2].slope,digits=3)) and CCC=$(round(rs[end].m[2].ccc,digits=4)), which is where over-smoothing finally shows up in a region-mean statistic."
     @printf("NOISE  σ_lo=%.1f σ_hi=%.1f HU | skew %+.2f/%+.2f exkurt %+.2f/%+.2f ⇒ %s | ACF lag1 x=%.2f y=%.2f ⇒ %.1f vox/indep sample | ρ(lo,hi)=%.2f\n",
         nz_lo.sd,nz_hi.sd,nz_lo.skew,nz_hi.skew,nz_lo.exkurt,nz_hi.exkurt,
         (abs(nz_lo.skew)<0.2 && abs(nz_lo.exkurt)<0.5) ? "Gaussian" : "NOT Gaussian",acf_x[2],acf_y[2],acf_len,ρ)
@@ -704,6 +738,14 @@ $(_rows)
 **Both `sd` columns fall monotonically to λ=100, but RMSE does not — that is the trap.** On circular, λ=100 is the smoothest (sd $(round(mean(swp_c[end][c].sd for c in 1:3),digits=4)) vs $(round(mean(swp_c[i_best][c].sd for c in 1:3),digits=4))) yet **$(round(Int,100*(rms3(swp_c[end])/rms3(swp_c[i_best])-1)))% less accurate** (RMSE $(round(rms3(swp_c[end]),digits=4)) vs $(round(rms3(swp_c[i_best]),digits=4))): past the minimum, TV buys smoothness with bias. Tuning λ by eye on the uniform region lands exactly there — which is why λ is scored, not looked at.
 
 **The sector does not show that turn-up** (RMSE $(round(rms3(swp_s[i_best]),digits=4)) at λ=$(LAM_BEST) → $(round(rms3(swp_s[end]),digits=4)) at λ=100, still flat/slightly falling), and that is worth stating rather than pocketing: its 16 wedges are large, so they carry far less boundary per unit area than the ø$(round(2*INS_R,digits=1)) mm discs and there is correspondingly less contrast for TV to eat. The sector is the harder geometry for the *decode*, but the **easier** one for a smoother — uniformity flatters. λ=$(LAM_BEST) is therefore taken from circular, the geometry that actually penalises over-smoothing, and it costs the sector nothing measurable.
+
+**Does TV cost the headline CCC / R² / slope?** The fig5 numbers cannot answer that — `pvox` decodes the **raw** core voxels and averages ~$(round(Int,mean(length(r.v_lo) for r in allrois))) of them per ROI, so TV never enters that path and fig5 is byte-identical at any λ. That is a measurement gap, not a safety guarantee: ROI-averaging is itself a ≈$(round(Int,sqrt(mean(length(r.v_lo) for r in allrois))))× denoiser handed the insert boundary for free (an oracle the delivered map never gets). So the same n=$(length(allrois)) ROIs are re-scored below **through the TV'd map** — the estimator that is actually delivered:
+
+| λ | f\\_w CCC | f\\_l CCC | f\\_p CCC | f\\_l slope | f\\_l R² | f\\_l RMSE |
+|---|---|---|---|---|---|---|
+$(_rows2)
+
+$(_verdict)
 
 **Why the correlation doesn't need its own model.** ≈$(round(acf_len,digits=1)) voxels per independent sample means the per-voxel w overstates the data's information by ≈$(round(acf_len,digits=1))×. That is a near-constant factor across the field — a global property of the scan geometry, not of any voxel — so it rescales w uniformly and the GT-scored λ absorbs it whole. An explicit correlated-noise model would buy a reparameterisation, not accuracy. It would start to matter if the correlation length varied spatially (a dense implant streaking one region).""")
 end
