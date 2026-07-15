@@ -560,9 +560,57 @@ begin
         x=(a+b)/2; (x=x, f=f(x), n=n+1)
     end
     _gold = golden_min(u->cal_pv_rmse(10.0^u), -1.0, 2.0; tol=0.02)  # λ∈[0.1,100]; tol ⇒ λ to ~5%
-    TV_LAMBDA = round(10.0^_gold.x, digits=2)                        # fitted — no literal, no const
+    LAM_GT = round(10.0^_gold.x, digits=2)                           # GT-supervised reference (phantom only)
     # unimodality is an assumption of golden-section, so check the bracket rather than trust it
-    _uni_ok = cal_pv_rmse(TV_LAMBDA) ≤ min(cal_pv_rmse(TV_LAMBDA/3), cal_pv_rmse(TV_LAMBDA*3)) + 1e-9
+    _uni_ok = cal_pv_rmse(LAM_GT) ≤ min(cal_pv_rmse(LAM_GT/3), cal_pv_rmse(LAM_GT*3)) + 1e-9
+
+    # ── SURE: the same fit WITHOUT ground truth, so the rule transfers off the phantom ───────────
+    # LAM_GT above is supervised by phantom GT and therefore cannot be computed on a patient. SURE
+    # (Stein 1981) estimates the risk from the noise model alone: for y = x + ε, ε ~ N(0,diag(σ²)),
+    #     SURE(λ) = ‖x̂_λ(y) − y‖² − Σσ² + 2·Σ σ²·∂x̂_i/∂y_i        E[SURE] = ‖x̂_λ − x‖²
+    # so minimising SURE ≈ minimising true MSE, with x unknown. The divergence has no closed form for
+    # an iterated clamped TV, so it is probed Monte-Carlo (Ramani, Blu & Unser 2008):
+    #     Σσ²∂x̂_i/∂y_i = tr(DJ) ≈ bᵀD(x̂(y+εb) − x̂(y))/ε ,  b ~ N(0,I),  D = diag(σ²)
+    # Applied in the FRACTION domain: y = the per-voxel decode, σ_f from the measured ladder pushed
+    # through the decode gradient — no GT anywhere, only quantities a real scan also provides.
+    #
+    # TWO ASSUMPTIONS THIS PIPELINE VIOLATES, stated up front and measured below, not waved past:
+    #  (a) independence. Our own ACF says lag-1 ≈ 0.45, so ε is NOT white. SURE's noise term Σσ² only
+    #      needs the diagonal and survives, but the divergence term should be tr(ΣJ), not σ²tr(J).
+    #      The residual bias is 2[Σσ²J_ii − tr(ΣJ)] ≤ 0 for a positive smoother and positive
+    #      correlation, i.e. SURE UNDER-states the risk, most where the smoother spreads.
+    #  (b) SURE targets E[y] — the decode's own noiseless output — not the true fractions. Any decode
+    #      bias is invisible to it. That is fine for choosing λ (TV cannot fix decode bias) but it
+    #      means SURE ≈ GT only if the decode is near-unbiased on these compositions.
+    # The phantom is the one place both can be checked: λ_SURE vs LAM_GT is the transfer evidence.
+    function sure_risk(lam; simplex=TV_SIMPLEX, seed=20260715)
+        tot=0.0; n=0; rng=Random.MersenneTwister(seed)
+        for s in CALPREP
+            yl=s.P.f0[2]; yp=s.P.f0[3]; gate=.!isnan.(yl)
+            xl,xp = tv_coupled(yl,yp,gate; lambda=lam,w=s.P.w,simplex=simplex)
+            εp = 1e-3*sqrt(median(x for x in s.P.v.vl if isfinite(x)))      # probe step ≪ σ_f
+            bl=randn(rng,size(yl)); bp=randn(rng,size(yp))
+            pl,pp = tv_coupled(yl.+εp.*bl, yp.+εp.*bp, gate; lambda=lam,w=s.P.w,simplex=simplex)
+            @inbounds for I in CartesianIndices(yl)
+                gate[I] || continue
+                σl2=s.P.v.vl[I]; σp2=s.P.v.vp[I]
+                (isfinite(σl2) && isfinite(σp2)) || continue
+                tot += (xl[I]-yl[I])^2 + (xp[I]-yp[I])^2 - σl2 - σp2 +
+                       2*(σl2*bl[I]*(pl[I]-xl[I]) + σp2*bp[I]*(pp[I]-xp[I]))/εp
+                n += 2
+            end
+        end
+        tot/n                                        # ≈ per-component MSE (may go negative: unbiased ⇒ noisy)
+    end
+    sure_rmse(lam)=sqrt(max(sure_risk(lam),0.0))     # SURE's PREDICTED RMSE, comparable to cal_pv_rmse
+    _gold_sure = golden_min(u->sure_risk(10.0^u), -1.0, 2.0; tol=0.02)
+    LAM_SURE = round(10.0^_gold_sure.x, digits=2)
+
+    # SURE is what ships: it is computable on a patient, where LAM_GT is not. LAM_GT stays as the
+    # phantom's verdict on whether that was allowed — quantified as the RMSE actually paid for using
+    # the GT-free rule instead of the oracle one.
+    TV_LAMBDA = LAM_SURE
+    _sure_cost = cal_pv_rmse(LAM_SURE)/cal_pv_rmse(LAM_GT)           # 1.00 ⇒ SURE lost nothing
 
     function deliver(m_lo,m_hi,m2,comps; lambda=TV_LAMBDA, simplex=TV_SIMPLEX)
         f0=fullfield(m_lo,m_hi); gate=.!isnan.(f0[2]); w=sigma_f_weight(m_lo,m_hi)
@@ -748,11 +796,13 @@ begin
 
     # (4) The λ fit, shown. This is the SAME objective §6 minimised (cal_pv_rmse), evaluated on a grid
     # purely to display the curve golden-section walked — the grid selects nothing.
-    LAMS=[0.0,0.05,0.3,1.0,3.0,5.0,10.0,15.0,20.0,30.0,50.0,100.0]
+    LAMS=[0.05,0.3,1.0,3.0,5.0,10.0,15.0,20.0,30.0,50.0,100.0]
     cal_curve=[cal_pv_rmse(l) for l in LAMS]
-    _tag(l)= l==TV_LAMBDA ? " ← **fitted λ**" : ""
-    _rows=join(["| $(l==0 ? "0 (raw)" : string(l)) | $(round(cal_curve[i],digits=4)) |$(_tag(l))"
+    sure_curve=[sure_rmse(l) for l in LAMS]          # GT-free prediction of the same quantity
+    _tag(l)= l==LAM_SURE ? " ← **SURE λ (ships)**" : l==LAM_GT ? " ← GT λ (reference)" : ""
+    _rows=join(["| $(l) | $(round(cal_curve[i],digits=4)) | $(round(sure_curve[i],digits=4)) |$(_tag(l))"
                 for (i,l) in enumerate(LAMS)],"\n")
+    _sure_corr=cor(cal_curve,sure_curve)
 
     # (5) Clamp schedule — also decided on calibration, and by a principle: never rectify per-voxel
     # before averaging (Jensen). The measurement only confirms what §6 already refuses.
@@ -781,15 +831,19 @@ begin
 
 **The σ\\_f weight was right; its scale was not.** median w=1/σ\\_f²=$(round(w_med,digits=1)), while `den = w + Σ_nbr λ/max(‖∇f‖,eps)`. At λ=0.05 (the original default) the 4 TV neighbours pulled **$(round(tv_pull(0.05),digits=3))×** the data — the TV was decorative and the "denoised" map was the raw decode. At the fitted λ=$(TV_LAMBDA) they pull $(round(tv_pull(TV_LAMBDA),digits=1))×.
 
-## λ is fitted, on calibration
+## λ is fitted by SURE, on calibration, and validated against GT
 
-**λ = $(TV_LAMBDA)** — golden-section on log₁₀λ over [0.1, 100], $(_gold.n) evaluations, minimising **per-voxel RMSE vs GT across the $(length(CALPREP)) calibration thoraxes**. No grid, no literal: change the scanner, the dose or the keV pair and λ refits itself. Bracket check (λ/3, λ, λ×3): **$(_uni_ok ? "unimodal ✓" : "NOT unimodal ✗ — golden-section's assumption fails, treat λ as unverified")**.
+**λ = $(LAM_SURE)**, chosen by **SURE** — Stein's Unbiased Risk Estimate, which estimates the risk from the *noise model alone* and needs no ground truth. That is the whole point: `LAM_GT` cannot be computed on a patient; SURE can, because every quantity it uses (the σ ladder, the decode gradient, the image itself) exists on a real scan. Divergence is probed Monte-Carlo (Ramani, Blu & Unser 2008) since an iterated clamped TV has no closed-form Jacobian. Golden-section on log₁₀λ ∈ [0.1,100], $(_gold_sure.n) evaluations.
 
-The held-out scans (circular test + sector) are **not** in this objective and never were — they are reported in §8 and below, never optimised against.
+**The phantom's job is to say whether that was allowed.** GT-supervised reference: **λ_GT = $(LAM_GT)** ($(_gold.n) evals; bracket check $(_uni_ok ? "unimodal ✓" : "NOT unimodal ✗ — treat λ as unverified")). Using SURE's λ instead of the oracle's costs **×$(round(_sure_cost,digits=3))** in calibration per-voxel RMSE ($(round(cal_pv_rmse(LAM_SURE),digits=4)) vs $(round(cal_pv_rmse(LAM_GT),digits=4))). The two curves correlate r=$(round(_sure_corr,digits=3)).
 
-| λ | calibration per-voxel RMSE |
-|---|---|
+Neither fit sees the held-out scans. λ carries no literal: change the scanner, dose or keV pair and it refits.
+
+| λ | calibration per-voxel RMSE (GT — phantom only) | SURE predicted RMSE (GT-free) |
+|---|---|---|
 $(_rows)
+
+SURE's assumptions are violated here in two known ways, so the agreement above is evidence, not entitlement: the noise is **not** white (lag-1 ACF $(round(acf_x[2],digits=2)) ⇒ the divergence term should be tr(ΣJ), not σ²tr(J), biasing SURE's risk *downward* where the smoother spreads), and SURE targets the decode's noiseless output rather than the true fractions, so it is blind to decode bias. Both are why λ_SURE is *checked* against λ_GT rather than trusted.
 
 **Clamp schedule** (also calibration-only; `:each` = project every sweep, `:once` = project the result, `:never` = raw): per-voxel RMSE $(join(["`:$(c.s)` $(round(c.rmse,digits=4))" for c in _clamp], " · ")). The choice is principled before it is measured — rectifying each voxel before averaging is a Jensen bias on any region mean drawn from the map, which is the same thing §6 refuses for the pooled decode. `:$(TV_SIMPLEX)` ships.
 
