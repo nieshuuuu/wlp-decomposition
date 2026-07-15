@@ -700,6 +700,145 @@ let f=CM.Figure(size=(1320,600))
     safe_save(joinpath(ASSET,"fig_phantom_labels.png"),f); f
 end
 
+# ╔═╡ aaaa0031-0000-4000-8000-000000000031
+# ── Noise measurement + the λ fit, ON CALIBRATION. Nothing here is chosen by how smooth it looks,
+# and nothing here touches the held-out scans: §6 fits λ from calibration, this cell shows the work.
+begin
+    # (1) WHAT distribution? Measure, don't assume. Poisson lives in the PROJECTION domain; each FBP
+    # voxel is a filtered weighted sum of ~10³ rays, so the CLT flattens the marginal back to Gaussian.
+    # The Poisson origin survives only as the σ(HU) ladder — the variance, not the shape.
+    _mom(v)=(m=mean(v);s=std(v);(sd=s,skew=mean(((v.-m)./s).^3),exkurt=mean(((v.-m)./s).^4)-3))
+    nz_lo=_mom(res_lo); nz_hi=_mom(res_hi)          # res_* are calibration-rod residuals
+
+    # (2) Is it iid? A per-voxel 1/σ² weight silently assumes yes. FBP streaks say otherwise, and a
+    # correlated noise field is exactly what a per-voxel weight CANNOT see. (core_idx: from §6.)
+    _cal1 = calsims[1]                              # a CALIBRATION scan, not the display/test thoraxes
+    _cal1_hi = _cal1.hu_hi[:,:,_midz(_cal1.hu_hi)]
+    function resid_img(h,m2,nins,rpx)               # HU − per-core mean, on eroded cores only (no PV edges)
+        r=fill(NaN,size(h))
+        for k in 1:nins; ci=core_idx(m2,ROD0-1+k,rpx); isempty(ci)&&continue
+            mu=mean(Float64(h[I]) for I in ci); for I in ci; r[I]=Float64(h[I])-mu; end; end
+        r
+    end
+    function acf1d(r,maxlag,dim)
+        s2=mean(x^2 for x in r if isfinite(x)); out=Float64[]
+        for d in 0:maxlag
+            acc=0.0;n=0
+            for J in CartesianIndices(r)
+                K=dim==1 ? CartesianIndex(J[1]+d,J[2]) : CartesianIndex(J[1],J[2]+d)
+                checkbounds(Bool,r,K)||continue; (isfinite(r[J])&&isfinite(r[K]))||continue
+                acc+=r[J]*r[K];n+=1
+            end
+            push!(out,acc/max(n,1)/s2)
+        end; out
+    end
+    rimg_hi=resid_img(_cal1_hi,map_m2,NHEART,CORE_RPX)
+    ACF_LAG=6; acf_x=acf1d(rimg_hi,ACF_LAG,1); acf_y=acf1d(rimg_hi,ACF_LAG,2)
+    acf_len=1+2*sum(max.(acf_x[2:end],0.0))         # ≈ #voxels per independent sample along x
+
+    # (3) The scale check: `den = w + Σ_nbr c`, w = 1/σ_f² (O(10²)), c = λ/max(‖∇f‖,eps) ≤ λ/eps.
+    # In a flat region ‖∇f‖ floors at eps, so the 4 neighbours together weigh 4λ/eps against w.
+    w_med=median(x for x in CALPREP[1].P.w if isfinite(x))
+    tv_pull(lam)=4*(lam/TV_EPS)/w_med               # TV:data leverage in a flat region. ≪1 ⇒ TV is decorative.
+
+    # (4) The λ fit, shown. This is the SAME objective §6 minimised (cal_pv_rmse), evaluated on a grid
+    # purely to display the curve golden-section walked — the grid selects nothing.
+    LAMS=[0.0,0.05,0.3,1.0,3.0,5.0,10.0,15.0,20.0,30.0,50.0,100.0]
+    cal_curve=[cal_pv_rmse(l) for l in LAMS]
+    _tag(l)= l==TV_LAMBDA ? " ← **fitted λ**" : ""
+    _rows=join(["| $(l==0 ? "0 (raw)" : string(l)) | $(round(cal_curve[i],digits=4)) |$(_tag(l))"
+                for (i,l) in enumerate(LAMS)],"\n")
+
+    # (5) Clamp schedule — also decided on calibration, and by a principle: never rectify per-voxel
+    # before averaging (Jensen). The measurement only confirms what §6 already refuses.
+    _clamp=[(s=sc, rmse=cal_pv_rmse(TV_LAMBDA;simplex=sc)) for sc in (:each,:once,:never)]
+
+    # (6) HELD-OUT REPORTING ONLY — λ is already fixed. These re-score §8's own ROIs through the same
+    # score_rois, sweeping λ, to SHOW the ROI-level consequence. Reading a λ off this table would be
+    # exactly the leak this restructure removes, so the fitted λ is marked, not chosen, here.
+    roi_stats(lam; simplex=TV_SIMPLEX) = (d=score_rois(lambda=lam, simplex=simplex);
+        (m=[metrics([r.t[c] for r in d],[r.p[c] for r in d]) for c in 1:3], n=length(d)))
+    LAMS2=sort(unique(vcat([0.0,3.0,10.0,30.0,100.0],TV_LAMBDA)))
+    rs=[roi_stats(l) for l in LAMS2]
+    i2_ship=findfirst(==(TV_LAMBDA),LAMS2)
+    _rows2=join(["| $(l==0 ? "0 (raw)" : string(l)) | $(round(rs[i].m[1].ccc,digits=4)) | $(round(rs[i].m[2].ccc,digits=4)) | $(round(rs[i].m[3].ccc,digits=4)) | $(round(rs[i].m[2].slope,digits=3)) | $(round(rs[i].m[2].rmse,digits=4)) |$(l==TV_LAMBDA ? " ← **fitted λ**" : "")"
+                for (i,l) in enumerate(LAMS2)],"\n")
+    # CCC is nearly insensitive here — it is dominated by the huge between-ROI spread, so a real
+    # degradation hides in its 3rd decimal. Judge the ROI cost on RMSE, and quote both.
+    _dccc=rs[i2_ship].m[2].ccc-rs[1].m[2].ccc
+    _rratio=rs[i2_ship].m[2].rmse/rs[1].m[2].rmse
+    _roi_verdict = _rratio<1.05 ?
+        "**ROI-level accuracy is unchanged** (f\\_l RMSE ×$(round(_rratio,digits=2)))." :
+        "that is a **real ROI-level cost: f\\_l RMSE ×$(round(_rratio,digits=2))** ($(round(rs[i2_ship].m[2].rmse,digits=4)) vs $(round(rs[1].m[2].rmse,digits=4))), and it is stated rather than hidden behind CCC — CCC is dominated by the between-ROI spread and barely moves ($(round(_dccc,digits=4))) while RMSE rises $(round(Int,100*(_rratio-1)))%."
+
+    Markdown.parse("""
+**Noise measured** (calibration rods) — σ($(Int(EHI)) keV)=$(round(nz_hi.sd,digits=1)) HU, skew $(round(nz_hi.skew,digits=2)), excess kurtosis $(round(nz_hi.exkurt,digits=2)) ⇒ **Gaussian marginal**. Poisson is upstream, in the projections; each FBP voxel sums ~10³ rays, so the CLT leaves the Poisson origin visible only as the σ(HU) ladder, not as the shape. Lag-1 ACF = **$(round(acf_x[2],digits=2))** (x) / $(round(acf_y[2],digits=2)) (y) ⇒ **spatially correlated**, ≈$(round(acf_len,digits=1)) voxels per independent sample. Not modelled explicitly: that is a near-constant factor on w (a scan-geometry property, not a per-voxel one), so it rescales w uniformly and the fitted λ absorbs it whole.
+
+**The σ\\_f weight was right; its scale was not.** median w=1/σ\\_f²=$(round(w_med,digits=1)), while `den = w + Σ_nbr λ/max(‖∇f‖,eps)`. At λ=0.05 (the original default) the 4 TV neighbours pulled **$(round(tv_pull(0.05),digits=3))×** the data — the TV was decorative and the "denoised" map was the raw decode. At the fitted λ=$(TV_LAMBDA) they pull $(round(tv_pull(TV_LAMBDA),digits=1))×.
+
+## λ is fitted, on calibration
+
+**λ = $(TV_LAMBDA)** — golden-section on log₁₀λ over [0.1, 100], $(_gold.n) evaluations, minimising **per-voxel RMSE vs GT across the $(length(CALPREP)) calibration thoraxes**. No grid, no literal: change the scanner, the dose or the keV pair and λ refits itself. Bracket check (λ/3, λ, λ×3): **$(_uni_ok ? "unimodal ✓" : "NOT unimodal ✗ — golden-section's assumption fails, treat λ as unverified")**.
+
+The held-out scans (circular test + sector) are **not** in this objective and never were — they are reported in §8 and below, never optimised against.
+
+| λ | calibration per-voxel RMSE |
+|---|---|
+$(_rows)
+
+**Clamp schedule** (also calibration-only; `:each` = project every sweep, `:once` = project the result, `:never` = raw): per-voxel RMSE $(join(["`:$(c.s)` $(round(c.rmse,digits=4))" for c in _clamp], " · ")). The choice is principled before it is measured — rectifying each voxel before averaging is a Jensen bias on any region mean drawn from the map, which is the same thing §6 refuses for the pooled decode. `:$(TV_SIMPLEX)` ships.
+
+## Held-out consequence (reported, not selected)
+
+λ was fixed above. This table only shows what the fitted λ does to the region-mean statistics §8 reports — λ=0 is the raw decode fig5 used to report in its place:
+
+| λ | f\\_w CCC | f\\_l CCC | f\\_p CCC | f\\_l slope | f\\_l RMSE |
+|---|---|---|---|---|---|
+$(_rows2)
+
+At the fitted λ=$(TV_LAMBDA), $(_roi_verdict)
+
+**This is the trade, and removing the leak is what exposed it.** The objective above is *per-voxel* RMSE — the map. It is not free at the region level, and it never was: averaging ~$(round(Int,mean(r.nvox for r in drois))) core voxels is already a ≈$(round(Int,sqrt(mean(r.nvox for r in drois))))× denoiser holding the insert boundary as an oracle the delivered map never gets, so TV has almost no variance left to remove there and mostly bias to add. A λ tuned to look good on *this* table would be tuned on held-out data — the exact leak §6 now forbids. So the honest options are: keep the per-voxel objective and accept the region-mean cost quoted above (what ships), or state an explicitly ROI-aware objective **and fit it on calibration too**. What is no longer available is reading a number off this table.
+
+**The map is what TV is for; this table is what proves it did not cheat.**
+""")
+end
+
+# ╔═╡ aaaa0032-0000-4000-8000-000000000032
+# λ side-by-side: raw per-voxel decode vs the FITTED λ, on both geometries. Both panels run the real
+# `deliver` path; only λ differs. λ comes from the calibration fit, so this figure follows the data.
+# GT sits alongside because "which λ" is settled against truth, not by eye.
+begin
+    circ_raw = deliver(map_lo,map_hi,map_m2,mcomps; lambda=0.0)
+    sect_raw = deliver(smap_lo,smap_hi,smap_m2,scomps; lambda=0.0)
+    function pv_stats(rec,m2,comps,rpx)                      # per-voxel f_l vs GT on the eroded cores
+        t=Float64[];r=Float64[];sds=Float64[]
+        for k in 1:length(comps); ci=core_idx(m2,ROD0-1+k,rpx); isempty(ci)&&continue
+            v=[rec[I,2] for I in ci if isfinite(rec[I,2])]; isempty(v)&&continue
+            append!(t,fill(comps[k][2],length(v))); append!(r,v); push!(sds,std(v))
+        end
+        (rmse=sqrt(mean((r.-t).^2)), sd=mean(sds))
+    end
+    LROWS=((circ,circ_raw,map_m2,mcomps,CORE_RPX,"circular"),(sect,sect_raw,smap_m2,scomps,7,"sector"))
+    let f=CM.Figure(size=(1180,780))
+        for (row,(D,R,m2,comps,rpx,nm)) in enumerate(LROWS)
+            hi=findall(!isnan,D.tru[:,:,2]); ci=extrema(getindex.(hi,1)); cj=extrema(getindex.(hi,2)); pad=18
+            rI=max(1,ci[1]-pad):min(size(m2,1),ci[2]+pad); rJ=max(1,cj[1]-pad):min(size(m2,2),cj[2]+pad)
+            sD=pv_stats(D.rec,m2,comps,rpx); sR=pv_stats(R.rec,m2,comps,rpx)
+            _st(st)= st===nothing ? "" : @sprintf("\nper-voxel RMSE %.4f · within-core sd %.4f",st.rmse,st.sd)
+            for (col,(img,ttl,st)) in enumerate(((D.tru[rI,rJ,2],"$nm · true f_l",nothing),
+                                                 (R.rec[rI,rJ,2],"λ=0 — raw per-voxel decode",sR),
+                                                 (D.rec[rI,rJ,2],"λ=$(TV_LAMBDA) — fitted, ships",sD)))
+                ax=CM.Axis(f[row,col];title=ttl*_st(st),titlesize=11,aspect=CM.DataAspect(),yreversed=true)
+                CM.hidedecorations!(ax); hm=CM.heatmap!(ax,img;colormap=:jet,colorrange=(0,1))
+                (row==1&&col==3) && CM.Colorbar(f[:,4],hm;label="f_l")
+            end
+        end
+        CM.Label(f[0,:],"f_l delivered map — raw decode vs fitted λ=$(TV_LAMBDA) (σ_f Huber-TV, simplex=:$(TV_SIMPLEX)); λ fitted on CALIBRATION by golden-section, held-out scans untouched\nROI-level check on the held-out n=$(length(drois)): f_l CCC $(round(rs[i2_ship].m[2].ccc,digits=4)) at λ=$(TV_LAMBDA) vs $(round(rs[1].m[2].ccc,digits=4)) raw — the map gains without the region means paying";fontsize=12,font=:bold)
+        safe_save(joinpath(ASSET,"fig10_lambda_compare.png"),f); f
+    end
+end
+
 # ╔═╡ aaaa0026-0000-4000-8000-000000000026
 # Portable model snapshot — dumps the fitted surface + noise + gate + calibration table to
 # wlp_model_<pair>.toml (stdlib TOML, no BasisSimulator), so the model can be applied outside
@@ -1014,13 +1153,22 @@ and PVE edges, whereas the GT-pooled map is flat because it uses a boundary real
 
 **The denoiser is fitted, not admired.** λ=$(TV_LAMBDA) is not a setting: it is the golden-section minimiser of
 per-voxel RMSE vs GT over the **calibration** thoraxes ($(_gold.n) evaluations on log₁₀λ ∈ [0.1,100]; §6.5). The
-held-out circular and sector scans are absent from that objective, so §8's numbers are a test score, not a
-training score — and λ carries no literal, so a new scanner or keV pair refits it. Three traps are worth naming.
-Smoothness is not accuracy: within-core σ falls monotonically with λ while RMSE turns back up, so an eye-tuned λ
-over-smooths and pays in bias. The simplex projection must fire **once**, not per sweep — rectifying every sweep
-is the same per-voxel Jensen bias this notebook refuses for the pooled decode. And the per-voxel optimum is not
-free at the region level: ROI-averaging is already a √N denoiser holding the boundary as an oracle, so TV can
-only add bias there — which is why the ROI table is reported (§6.5) rather than optimised against.
+held-out circular and sector scans are absent from that objective, so the table above is a test score, not a
+training score — and λ carries no literal, so a new scanner, dose or keV pair refits it.
+
+**What it costs, plainly.** The objective is the *map*, and the map is not free at the region level: vs the raw
+decode, the fitted λ leaves f\\_l CCC at $(round(ml.ccc,digits=4)) but multiplies ROI f\\_l RMSE by
+**$(round(_rratio,digits=2))×**. That is the honest price of a per-voxel objective, and it is quoted rather than
+buried in CCC's third decimal — CCC is dominated by the between-ROI spread and is nearly blind to this. Anyone
+who needs region means more than maps should state an ROI-aware objective **and fit it on calibration**; what is
+not allowed is tuning λ against the held-out table.
+
+Three traps are worth naming. Smoothness is not accuracy: within-core σ falls monotonically with λ while RMSE
+turns back up, so an eye-tuned λ over-smooths and pays in bias. The simplex projection must fire **once**, not
+per sweep — rectifying every sweep is the same per-voxel Jensen bias this notebook refuses for the pooled decode
+(and on calibration `:once` also happens to beat both `:each` and `:never` on per-voxel RMSE). And λ here is
+supervised by phantom GT, so it **does not transfer to real CT**: with no GT, refit it GT-free at the measured
+noise level — the discrepancy principle against the σ ladder, GCV, or SURE — rather than copying this number.
 
 **Integrated-HU** (fig 6) is the answer to partial-volume underestimation of small fat: the object-extent
 measure loses $(round(Int,100-100*minimum(r.naivelip/r.truelip for r in integ)))% of a 4 mm fat object, while
@@ -1031,320 +1179,6 @@ integrated-HU fixes the *numerator* (total lipid) — a region *mean* still need
 local background must be a field (not a constant) because PVAT muscle isn't uniform; and conservation is exact
 only for linear/FBP recon, so a clinical DLIR/QIR transfer must re-earn it empirically.
 """)
-
-# ╔═╡ a50d883c-80a1-11f1-9e31-ef65a20a6d47
-# The phantom label map as every downstream figure actually sees it: `map_m2` / `smap_m2`, i.e. the
-# 0.4 mm mask nearest-neighbour resampled to the 512² recon grid, mid-slice. Axes are phantom-frame
-# mm (not pixels) so the geometry is readable directly; yreversed ⇒ spine down = standard CT view.
-# Left: 13 hex-packed circular inserts (calibration + circular test). Right: 16 sector wedges, the
-# held-out test geometry. Insert numbers k index `mcomps[k]` / `scomps[k]` — label = ROD0-1+k.
-#
-# Insert colour is a deliberately neutral "mixture slot", NOT a tissue colour: the inserts are
-# `diverse_comps` spanning the whole W/L/P triangle (f_w 0.02–0.83 here — over half are water-
-# dominant), so they are not adipose and no tissue colour would be honest. Amber/blue/red are
-# reserved for the lipid/water/protein endpoints in fig_decode_triangle_noise. The label map is
-# also shared across scans while each scan redraws its own comps, so colour cannot encode
-# composition here — see the delivered map (fig3/fig7) for that.
-let f=CM.Figure(size=(1320,600))
-    x_mm(i)=185.0+(-RECON_FOV_MM/2+RECON_PX_MM/2+(i-1)*RECON_PX_MM)   # recon px → phantom mm (auto-centred on isocentre)
-    y_mm(j)=135.0+(-RECON_FOV_MM/2+RECON_PX_MM/2+(j-1)*RECON_PX_MM)
-    TIS=(0x00=>("air",CM.RGBf(1.00,1.00,1.00)), 0x01=>("lung",CM.RGBf(0.78,0.86,0.93)),
-         0x02=>("muscle",CM.RGBf(0.75,0.44,0.42)), 0x03=>("cortical bone",CM.RGBf(0.93,0.91,0.83)),
-         0x04=>("red marrow",CM.RGBf(0.85,0.55,0.58)), 0x05=>("adipose (fat ring)",CM.RGBf(0.97,0.83,0.46)))
-    INS=CM.RGBf(0.42,0.38,0.60); cmap=Dict(k=>c for (k,(_,c)) in TIS)
-    colorize(m)=[get(cmap,l,INS) for l in m]                          # anything ≥ ROD0 is a WLP insert
-    xr=(185.0-RECON_FOV_MM/2,185.0+RECON_FOV_MM/2); yr=(135.0-RECON_FOV_MM/2,135.0+RECON_FOV_MM/2)  # image! wants outer edges
-    θ=range(0,2π,200)
-    # Circular inserts are compact ⇒ centroid is fine. Sector wedges are annular, so their centroid
-    # drifts inward and the inner ring collides at the hub: place those on the wedge bisector at a
-    # fixed fraction of the ring, derived from the same constants that build them.
-    cpos(k)=(t=label_centroid(map_m2,UInt8(ROD0-1+k)); (x_mm(t[1]),y_mm(t[2])))
-    spos(k)=(a=((k-1)%SECT_NANG+0.5)*(2π/SECT_NANG); r=(SECT_R_MM/SECT_NRAD)*((k-1)÷SECT_NANG+0.55); (HC_X+r*cos(a),HC_Y+r*sin(a)))
-    for (col,(m,cmps,pos,ttl)) in enumerate(((map_m2,mcomps,cpos,"circular — $(length(mcomps)) hex-packed inserts, ø$(round(2*INS_R,digits=1)) mm"),
-                                             (smap_m2,scomps,spos,"sector — $(length(scomps)) wedges, r ≤ $(Int(SECT_R_MM)) mm (held-out)")))
-        ax=CM.Axis(f[1,col];aspect=CM.DataAspect(),yreversed=true,xlabel="x (mm)",ylabel=col==1 ? "y (mm)" : "",title=ttl,titlesize=11)
-        CM.image!(ax,xr,yr,colorize(m))
-        CM.lines!(ax,HC_X.+HEART_R_MM.*cos.(θ),HC_Y.+HEART_R_MM.*sin.(θ);color=:black,linestyle=:dash,linewidth=1.1)
-        CM.text!(ax,HC_X+HEART_R_MM+6,HC_Y;text="heart cavity\nr = $(Int(HEART_R_MM)) mm",fontsize=9,align=(:left,:center))
-        if col==2                       # wedges share one colour ⇒ draw the lattice or it reads as a solid disc
-            for a in 0:SECT_NANG-1
-                φ=a*(2π/SECT_NANG); CM.lines!(ax,[HC_X,HC_X+SECT_R_MM*cos(φ)],[HC_Y,HC_Y+SECT_R_MM*sin(φ)];color=(:white,0.8),linewidth=0.8)
-            end
-            for ri in 1:SECT_NRAD-1
-                rr=ri*(SECT_R_MM/SECT_NRAD); CM.lines!(ax,HC_X.+rr.*cos.(θ),HC_Y.+rr.*sin.(θ);color=(:white,0.8),linewidth=0.8)
-            end
-        end
-        for k in 1:length(cmps)
-            px,py=pos(k); isnan(px) && continue
-            CM.text!(ax,px,py;text=string(k),color=:white,fontsize=9,font=:bold,align=(:center,:center))
-        end
-    end
-    swatch(c)=CM.PolyElement(color=c,strokecolor=CM.RGBf(0.6,0.6,0.6),strokewidth=0.5)   # stroke: air is white-on-white
-    els=CM.PolyElement[]; lbls=String[]
-    for (k,(n,c)) in TIS; push!(els,swatch(c)); push!(lbls,"$(Int(k)) · $n"); end
-    push!(els,swatch(INS)); push!(lbls,"$(ROD0)+ · W/L/P mixture\n        slots (per-scan comps)")
-    CM.Legend(f[1,3],els,lbls,"label → material";framevisible=false,labelsize=10,titlesize=10)
-    CM.Label(f[0,:],"QRM-thorax phantom label map — 512² recon grid, mid-slice, phantom-frame mm · posterior down · numbers index mcomps/scomps";fontsize=12,font=:bold)
-    safe_save(joinpath(ASSET,"fig_phantom_labels.png"),f); f
-end
-
-# ╔═╡ a50d90c0-80a1-11f1-b5e0-eb001c4d4cda
-# ── Noise measurement + the λ fit, ON CALIBRATION. Nothing here is chosen by how smooth it looks,
-# and nothing here touches the held-out scans: §6 fits λ from calibration, this cell shows the work.
-begin
-    # (1) WHAT distribution? Measure, don't assume. Poisson lives in the PROJECTION domain; each FBP
-    # voxel is a filtered weighted sum of ~10³ rays, so the CLT flattens the marginal back to Gaussian.
-    # The Poisson origin survives only as the σ(HU) ladder — the variance, not the shape.
-    _mom(v)=(m=mean(v);s=std(v);(sd=s,skew=mean(((v.-m)./s).^3),exkurt=mean(((v.-m)./s).^4)-3))
-    nz_lo=_mom(res_lo); nz_hi=_mom(res_hi)          # res_* are calibration-rod residuals
-
-    # (2) Is it iid? A per-voxel 1/σ² weight silently assumes yes. FBP streaks say otherwise, and a
-    # correlated noise field is exactly what a per-voxel weight CANNOT see. (core_idx: from §6.)
-    _cal1 = calsims[1]                              # a CALIBRATION scan, not the display/test thoraxes
-    _cal1_hi = _cal1.hu_hi[:,:,_midz(_cal1.hu_hi)]
-    function resid_img(h,m2,nins,rpx)               # HU − per-core mean, on eroded cores only (no PV edges)
-        r=fill(NaN,size(h))
-        for k in 1:nins; ci=core_idx(m2,ROD0-1+k,rpx); isempty(ci)&&continue
-            mu=mean(Float64(h[I]) for I in ci); for I in ci; r[I]=Float64(h[I])-mu; end; end
-        r
-    end
-    function acf1d(r,maxlag,dim)
-        s2=mean(x^2 for x in r if isfinite(x)); out=Float64[]
-        for d in 0:maxlag
-            acc=0.0;n=0
-            for J in CartesianIndices(r)
-                K=dim==1 ? CartesianIndex(J[1]+d,J[2]) : CartesianIndex(J[1],J[2]+d)
-                checkbounds(Bool,r,K)||continue; (isfinite(r[J])&&isfinite(r[K]))||continue
-                acc+=r[J]*r[K];n+=1
-            end
-            push!(out,acc/max(n,1)/s2)
-        end; out
-    end
-    rimg_hi=resid_img(_cal1_hi,map_m2,NHEART,CORE_RPX)
-    ACF_LAG=6; acf_x=acf1d(rimg_hi,ACF_LAG,1); acf_y=acf1d(rimg_hi,ACF_LAG,2)
-    acf_len=1+2*sum(max.(acf_x[2:end],0.0))         # ≈ #voxels per independent sample along x
-
-    # (3) The scale check: `den = w + Σ_nbr c`, w = 1/σ_f² (O(10²)), c = λ/max(‖∇f‖,eps) ≤ λ/eps.
-    # In a flat region ‖∇f‖ floors at eps, so the 4 neighbours together weigh 4λ/eps against w.
-    w_med=median(x for x in CALPREP[1].P.w if isfinite(x))
-    tv_pull(lam)=4*(lam/TV_EPS)/w_med               # TV:data leverage in a flat region. ≪1 ⇒ TV is decorative.
-
-    # (4) The λ fit, shown. This is the SAME objective §6 minimised (cal_pv_rmse), evaluated on a grid
-    # purely to display the curve golden-section walked — the grid selects nothing.
-    LAMS=[0.0,0.05,0.3,1.0,3.0,5.0,10.0,15.0,20.0,30.0,50.0,100.0]
-    cal_curve=[cal_pv_rmse(l) for l in LAMS]
-    _tag(l)= l==TV_LAMBDA ? " ← **fitted λ**" : ""
-    _rows=join(["| $(l==0 ? "0 (raw)" : string(l)) | $(round(cal_curve[i],digits=4)) |$(_tag(l))"
-                for (i,l) in enumerate(LAMS)],"\n")
-
-    # (5) Clamp schedule — also decided on calibration, and by a principle: never rectify per-voxel
-    # before averaging (Jensen). The measurement only confirms what §6 already refuses.
-    _clamp=[(s=sc, rmse=cal_pv_rmse(TV_LAMBDA;simplex=sc)) for sc in (:each,:once,:never)]
-
-    # (6) HELD-OUT REPORTING ONLY — λ is already fixed. These re-score §8's own ROIs through the same
-    # score_rois, sweeping λ, to SHOW the ROI-level consequence. Reading a λ off this table would be
-    # exactly the leak this restructure removes, so the fitted λ is marked, not chosen, here.
-    roi_stats(lam; simplex=TV_SIMPLEX) = (d=score_rois(lambda=lam, simplex=simplex);
-        (m=[metrics([r.t[c] for r in d],[r.p[c] for r in d]) for c in 1:3], n=length(d)))
-    LAMS2=sort(unique(vcat([0.0,3.0,10.0,30.0,100.0],TV_LAMBDA)))
-    rs=[roi_stats(l) for l in LAMS2]
-    i2_ship=findfirst(==(TV_LAMBDA),LAMS2)
-    _rows2=join(["| $(l==0 ? "0 (raw)" : string(l)) | $(round(rs[i].m[1].ccc,digits=4)) | $(round(rs[i].m[2].ccc,digits=4)) | $(round(rs[i].m[3].ccc,digits=4)) | $(round(rs[i].m[2].slope,digits=3)) | $(round(rs[i].m[2].rmse,digits=4)) |$(l==TV_LAMBDA ? " ← **fitted λ**" : "")"
-                for (i,l) in enumerate(LAMS2)],"\n")
-    _dccc=rs[i2_ship].m[2].ccc-rs[1].m[2].ccc
-
-    Markdown.parse("""
-**Noise measured** (calibration rods) — σ($(Int(EHI)) keV)=$(round(nz_hi.sd,digits=1)) HU, skew $(round(nz_hi.skew,digits=2)), excess kurtosis $(round(nz_hi.exkurt,digits=2)) ⇒ **Gaussian marginal**. Poisson is upstream, in the projections; each FBP voxel sums ~10³ rays, so the CLT leaves the Poisson origin visible only as the σ(HU) ladder, not as the shape. Lag-1 ACF = **$(round(acf_x[2],digits=2))** (x) / $(round(acf_y[2],digits=2)) (y) ⇒ **spatially correlated**, ≈$(round(acf_len,digits=1)) voxels per independent sample. Not modelled explicitly: that is a near-constant factor on w (a scan-geometry property, not a per-voxel one), so it rescales w uniformly and the fitted λ absorbs it whole.
-
-**The σ\\_f weight was right; its scale was not.** median w=1/σ\\_f²=$(round(w_med,digits=1)), while `den = w + Σ_nbr λ/max(‖∇f‖,eps)`. At λ=0.05 (the original default) the 4 TV neighbours pulled **$(round(tv_pull(0.05),digits=3))×** the data — the TV was decorative and the "denoised" map was the raw decode. At the fitted λ=$(TV_LAMBDA) they pull $(round(tv_pull(TV_LAMBDA),digits=1))×.
-
-## λ is fitted, on calibration
-
-**λ = $(TV_LAMBDA)** — golden-section on log₁₀λ over [0.1, 100], $(_gold.n) evaluations, minimising **per-voxel RMSE vs GT across the $(length(CALPREP)) calibration thoraxes**. No grid, no literal: change the scanner, the dose or the keV pair and λ refits itself. Bracket check (λ/3, λ, λ×3): **$(_uni_ok ? "unimodal ✓" : "NOT unimodal ✗ — golden-section's assumption fails, treat λ as unverified")**.
-
-The held-out scans (circular test + sector) are **not** in this objective and never were — they are reported in §8 and below, never optimised against.
-
-| λ | calibration per-voxel RMSE |
-|---|---|
-$(_rows)
-
-**Clamp schedule** (also calibration-only; `:each` = project every sweep, `:once` = project the result, `:never` = raw): per-voxel RMSE $(join(["`:$(c.s)` $(round(c.rmse,digits=4))" for c in _clamp], " · ")). The choice is principled before it is measured — rectifying each voxel before averaging is a Jensen bias on any region mean drawn from the map, which is the same thing §6 refuses for the pooled decode. `:$(TV_SIMPLEX)` ships.
-
-## Held-out consequence (reported, not selected)
-
-λ was fixed above. This table only shows what the fitted λ does to the region-mean statistics §8 reports — λ=0 is the raw decode fig5 used to report in its place:
-
-| λ | f\\_w CCC | f\\_l CCC | f\\_p CCC | f\\_l slope | f\\_l RMSE |
-|---|---|---|---|---|---|
-$(_rows2)
-
-At the fitted λ=$(TV_LAMBDA), f\\_l CCC moves $(_dccc≥0 ? "+" : "")$(round(_dccc,digits=4)) vs the raw decode$(abs(_dccc)<0.002 ? " — **ROI-level accuracy is unchanged**" : _dccc<0 ? " — **a real ROI-level cost**, visible here and not hidden" : " — TV *improves* it"). Two facts make that unsurprising and worth stating: averaging ~$(round(Int,mean(r.nvox for r in drois))) core voxels is already a ≈$(round(Int,sqrt(mean(r.nvox for r in drois))))× denoiser, and it is handed the insert boundary for free — an oracle the delivered map never gets. So at ROI level there is little variance left for TV to remove and mostly bias for it to add, while the map at λ=0 is still filthy. **The map is the thing TV is for; the ROI table is the thing that proves it did not cheat.**
-""")
-end
-
-# ╔═╡ aaaa0032-0000-4000-8000-000000000032
-# λ side-by-side: raw per-voxel decode vs the FITTED λ, on both geometries. Both panels run the real
-# `deliver` path; only λ differs. λ comes from the calibration fit, so this figure follows the data.
-# GT sits alongside because "which λ" is settled against truth, not by eye.
-begin
-    circ_raw = deliver(map_lo,map_hi,map_m2,mcomps; lambda=0.0)
-    sect_raw = deliver(smap_lo,smap_hi,smap_m2,scomps; lambda=0.0)
-    function pv_stats(rec,m2,comps,rpx)                      # per-voxel f_l vs GT on the eroded cores
-        t=Float64[];r=Float64[];sds=Float64[]
-        for k in 1:length(comps); ci=core_idx(m2,ROD0-1+k,rpx); isempty(ci)&&continue
-            v=[rec[I,2] for I in ci if isfinite(rec[I,2])]; isempty(v)&&continue
-            append!(t,fill(comps[k][2],length(v))); append!(r,v); push!(sds,std(v))
-        end
-        (rmse=sqrt(mean((r.-t).^2)), sd=mean(sds))
-    end
-    LROWS=((circ,circ_raw,map_m2,mcomps,CORE_RPX,"circular"),(sect,sect_raw,smap_m2,scomps,7,"sector"))
-    let f=CM.Figure(size=(1180,780))
-        for (row,(D,R,m2,comps,rpx,nm)) in enumerate(LROWS)
-            hi=findall(!isnan,D.tru[:,:,2]); ci=extrema(getindex.(hi,1)); cj=extrema(getindex.(hi,2)); pad=18
-            rI=max(1,ci[1]-pad):min(size(m2,1),ci[2]+pad); rJ=max(1,cj[1]-pad):min(size(m2,2),cj[2]+pad)
-            sD=pv_stats(D.rec,m2,comps,rpx); sR=pv_stats(R.rec,m2,comps,rpx)
-            _st(st)= st===nothing ? "" : @sprintf("\nper-voxel RMSE %.4f · within-core sd %.4f",st.rmse,st.sd)
-            for (col,(img,ttl,st)) in enumerate(((D.tru[rI,rJ,2],"$nm · true f_l",nothing),
-                                                 (R.rec[rI,rJ,2],"λ=0 — raw per-voxel decode",sR),
-                                                 (D.rec[rI,rJ,2],"λ=$(TV_LAMBDA) — fitted, ships",sD)))
-                ax=CM.Axis(f[row,col];title=ttl*_st(st),titlesize=11,aspect=CM.DataAspect(),yreversed=true)
-                CM.hidedecorations!(ax); hm=CM.heatmap!(ax,img;colormap=:jet,colorrange=(0,1))
-                (row==1&&col==3) && CM.Colorbar(f[:,4],hm;label="f_l")
-            end
-        end
-        CM.Label(f[0,:],"f_l delivered map — raw decode vs fitted λ=$(TV_LAMBDA) (σ_f Huber-TV, simplex=:$(TV_SIMPLEX)); λ fitted on CALIBRATION by golden-section, held-out scans untouched\nROI-level check on the held-out n=$(length(drois)): f_l CCC $(round(rs[i2_ship].m[2].ccc,digits=4)) at λ=$(TV_LAMBDA) vs $(round(rs[1].m[2].ccc,digits=4)) raw — the map gains without the region means paying";fontsize=12,font=:bold)
-        safe_save(joinpath(ASSET,"fig10_lambda_compare.png"),f); f
-    end
-end
-
-# ╔═╡ a50d987c-80a1-11f1-a3c3-6bd63bdcb70c
-# λ side-by-side: what SHIPS (TV_LAMBDA) vs the per-voxel argmin (LAM_BEST, taken from the sweep —
-# not typed in, so this figure follows the data). Both panels run the real `deliver` path; only λ
-# differs. GT is shown alongside because the question "which λ" is settled against truth, not by eye.
-begin
-    circ_alt = deliver(map_lo,map_hi,map_m2,mcomps; lambda=LAM_BEST)
-    sect_alt = deliver(smap_lo,smap_hi,smap_m2,scomps; lambda=LAM_BEST)
-    function pv_stats(rec,m2,comps,rpx)                      # per-voxel f_l vs GT on the eroded cores
-        t=Float64[];r=Float64[];sds=Float64[]
-        for k in 1:length(comps); ci=core_idx(m2,ROD0-1+k,rpx); isempty(ci)&&continue
-            v=[rec[I,2] for I in ci if isfinite(rec[I,2])]; isempty(v)&&continue
-            append!(t,fill(comps[k][2],length(v))); append!(r,v); push!(sds,std(v))
-        end
-        (rmse=sqrt(mean((r.-t).^2)), sd=mean(sds))
-    end
-    LROWS=((circ,circ_alt,map_m2,mcomps,CORE_RPX,"circular"),(sect,sect_alt,smap_m2,scomps,7,"sector"))
-    let f=CM.Figure(size=(1180,780))
-        for (row,(D,A,m2,comps,rpx,nm)) in enumerate(LROWS)
-            hi=findall(!isnan,D.tru[:,:,2]); ci=extrema(getindex.(hi,1)); cj=extrema(getindex.(hi,2)); pad=18
-            rI=max(1,ci[1]-pad):min(size(m2,1),ci[2]+pad); rJ=max(1,cj[1]-pad):min(size(m2,2),cj[2]+pad)
-            sD=pv_stats(D.rec,m2,comps,rpx); sA=pv_stats(A.rec,m2,comps,rpx)
-            _st(st)= st===nothing ? "" : @sprintf("\nper-voxel RMSE %.4f · within-core sd %.4f",st.rmse,st.sd)
-            for (col,(img,ttl,st)) in enumerate(((D.tru[rI,rJ,2],"$nm · true f_l",nothing),
-                                                 (D.rec[rI,rJ,2],"λ=$(TV_LAMBDA) — ships",sD),
-                                                 (A.rec[rI,rJ,2],"λ=$(LAM_BEST) — per-voxel argmin",sA)))
-                ax=CM.Axis(f[row,col];title=ttl*_st(st),titlesize=11,aspect=CM.DataAspect(),yreversed=true)
-                CM.hidedecorations!(ax); hm=CM.heatmap!(ax,img;colormap=:jet,colorrange=(0,1))
-                (row==1&&col==3) && CM.Colorbar(f[:,4],hm;label="f_l")
-            end
-        end
-        CM.Label(f[0,:],"f_l delivered map — shipped λ=$(TV_LAMBDA) vs per-voxel argmin λ=$(LAM_BEST) (σ_f Huber-TV, simplex=:$(TV_SIMPLEX))\nλ=$(LAM_BEST) is the smoother map, but at ROI level it costs f_l RMSE $(round(rs[i2_best].m[2].rmse,digits=4)) vs $(round(rs[i2_ship].m[2].rmse,digits=4)) and CCC $(round(rs[i2_best].m[2].ccc,digits=4)) vs $(round(rs[i2_ship].m[2].ccc,digits=4)) — the trade, not a free win";fontsize=12,font=:bold)
-        safe_save(joinpath(ASSET,"fig10_lambda_compare.png"),f); f
-    end
-end
-
-# ╔═╡ aaaa0031-0000-4000-8000-000000000031
-# ── Noise measurement + the λ fit, ON CALIBRATION. Nothing here is chosen by how smooth it looks,
-# and nothing here touches the held-out scans: §6 fits λ from calibration, this cell shows the work.
-begin
-    # (1) WHAT distribution? Measure, don't assume. Poisson lives in the PROJECTION domain; each FBP
-    # voxel is a filtered weighted sum of ~10³ rays, so the CLT flattens the marginal back to Gaussian.
-    # The Poisson origin survives only as the σ(HU) ladder — the variance, not the shape.
-    _mom(v)=(m=mean(v);s=std(v);(sd=s,skew=mean(((v.-m)./s).^3),exkurt=mean(((v.-m)./s).^4)-3))
-    nz_lo=_mom(res_lo); nz_hi=_mom(res_hi)          # res_* are calibration-rod residuals
-
-    # (2) Is it iid? A per-voxel 1/σ² weight silently assumes yes. FBP streaks say otherwise, and a
-    # correlated noise field is exactly what a per-voxel weight CANNOT see. (core_idx: from §6.)
-    _cal1 = calsims[1]                              # a CALIBRATION scan, not the display/test thoraxes
-    _cal1_hi = _cal1.hu_hi[:,:,_midz(_cal1.hu_hi)]
-    function resid_img(h,m2,nins,rpx)               # HU − per-core mean, on eroded cores only (no PV edges)
-        r=fill(NaN,size(h))
-        for k in 1:nins; ci=core_idx(m2,ROD0-1+k,rpx); isempty(ci)&&continue
-            mu=mean(Float64(h[I]) for I in ci); for I in ci; r[I]=Float64(h[I])-mu; end; end
-        r
-    end
-    function acf1d(r,maxlag,dim)
-        s2=mean(x^2 for x in r if isfinite(x)); out=Float64[]
-        for d in 0:maxlag
-            acc=0.0;n=0
-            for J in CartesianIndices(r)
-                K=dim==1 ? CartesianIndex(J[1]+d,J[2]) : CartesianIndex(J[1],J[2]+d)
-                checkbounds(Bool,r,K)||continue; (isfinite(r[J])&&isfinite(r[K]))||continue
-                acc+=r[J]*r[K];n+=1
-            end
-            push!(out,acc/max(n,1)/s2)
-        end; out
-    end
-    rimg_hi=resid_img(_cal1_hi,map_m2,NHEART,CORE_RPX)
-    ACF_LAG=6; acf_x=acf1d(rimg_hi,ACF_LAG,1); acf_y=acf1d(rimg_hi,ACF_LAG,2)
-    acf_len=1+2*sum(max.(acf_x[2:end],0.0))         # ≈ #voxels per independent sample along x
-
-    # (3) The scale check: `den = w + Σ_nbr c`, w = 1/σ_f² (O(10²)), c = λ/max(‖∇f‖,eps) ≤ λ/eps.
-    # In a flat region ‖∇f‖ floors at eps, so the 4 neighbours together weigh 4λ/eps against w.
-    w_med=median(x for x in CALPREP[1].P.w if isfinite(x))
-    tv_pull(lam)=4*(lam/TV_EPS)/w_med               # TV:data leverage in a flat region. ≪1 ⇒ TV is decorative.
-
-    # (4) The λ fit, shown. This is the SAME objective §6 minimised (cal_pv_rmse), evaluated on a grid
-    # purely to display the curve golden-section walked — the grid selects nothing.
-    LAMS=[0.0,0.05,0.3,1.0,3.0,5.0,10.0,15.0,20.0,30.0,50.0,100.0]
-    cal_curve=[cal_pv_rmse(l) for l in LAMS]
-    _tag(l)= l==TV_LAMBDA ? " ← **fitted λ**" : ""
-    _rows=join(["| $(l==0 ? "0 (raw)" : string(l)) | $(round(cal_curve[i],digits=4)) |$(_tag(l))"
-                for (i,l) in enumerate(LAMS)],"\n")
-
-    # (5) Clamp schedule — also decided on calibration, and by a principle: never rectify per-voxel
-    # before averaging (Jensen). The measurement only confirms what §6 already refuses.
-    _clamp=[(s=sc, rmse=cal_pv_rmse(TV_LAMBDA;simplex=sc)) for sc in (:each,:once,:never)]
-
-    # (6) HELD-OUT REPORTING ONLY — λ is already fixed. These re-score §8's own ROIs through the same
-    # score_rois, sweeping λ, to SHOW the ROI-level consequence. Reading a λ off this table would be
-    # exactly the leak this restructure removes, so the fitted λ is marked, not chosen, here.
-    roi_stats(lam; simplex=TV_SIMPLEX) = (d=score_rois(lambda=lam, simplex=simplex);
-        (m=[metrics([r.t[c] for r in d],[r.p[c] for r in d]) for c in 1:3], n=length(d)))
-    LAMS2=sort(unique(vcat([0.0,3.0,10.0,30.0,100.0],TV_LAMBDA)))
-    rs=[roi_stats(l) for l in LAMS2]
-    i2_ship=findfirst(==(TV_LAMBDA),LAMS2)
-    _rows2=join(["| $(l==0 ? "0 (raw)" : string(l)) | $(round(rs[i].m[1].ccc,digits=4)) | $(round(rs[i].m[2].ccc,digits=4)) | $(round(rs[i].m[3].ccc,digits=4)) | $(round(rs[i].m[2].slope,digits=3)) | $(round(rs[i].m[2].rmse,digits=4)) |$(l==TV_LAMBDA ? " ← **fitted λ**" : "")"
-                for (i,l) in enumerate(LAMS2)],"\n")
-    _dccc=rs[i2_ship].m[2].ccc-rs[1].m[2].ccc
-
-    Markdown.parse("""
-**Noise measured** (calibration rods) — σ($(Int(EHI)) keV)=$(round(nz_hi.sd,digits=1)) HU, skew $(round(nz_hi.skew,digits=2)), excess kurtosis $(round(nz_hi.exkurt,digits=2)) ⇒ **Gaussian marginal**. Poisson is upstream, in the projections; each FBP voxel sums ~10³ rays, so the CLT leaves the Poisson origin visible only as the σ(HU) ladder, not as the shape. Lag-1 ACF = **$(round(acf_x[2],digits=2))** (x) / $(round(acf_y[2],digits=2)) (y) ⇒ **spatially correlated**, ≈$(round(acf_len,digits=1)) voxels per independent sample. Not modelled explicitly: that is a near-constant factor on w (a scan-geometry property, not a per-voxel one), so it rescales w uniformly and the fitted λ absorbs it whole.
-
-**The σ\\_f weight was right; its scale was not.** median w=1/σ\\_f²=$(round(w_med,digits=1)), while `den = w + Σ_nbr λ/max(‖∇f‖,eps)`. At λ=0.05 (the original default) the 4 TV neighbours pulled **$(round(tv_pull(0.05),digits=3))×** the data — the TV was decorative and the "denoised" map was the raw decode. At the fitted λ=$(TV_LAMBDA) they pull $(round(tv_pull(TV_LAMBDA),digits=1))×.
-
-## λ is fitted, on calibration
-
-**λ = $(TV_LAMBDA)** — golden-section on log₁₀λ over [0.1, 100], $(_gold.n) evaluations, minimising **per-voxel RMSE vs GT across the $(length(CALPREP)) calibration thoraxes**. No grid, no literal: change the scanner, the dose or the keV pair and λ refits itself. Bracket check (λ/3, λ, λ×3): **$(_uni_ok ? "unimodal ✓" : "NOT unimodal ✗ — golden-section's assumption fails, treat λ as unverified")**.
-
-The held-out scans (circular test + sector) are **not** in this objective and never were — they are reported in §8 and below, never optimised against.
-
-| λ | calibration per-voxel RMSE |
-|---|---|
-$(_rows)
-
-**Clamp schedule** (also calibration-only; `:each` = project every sweep, `:once` = project the result, `:never` = raw): per-voxel RMSE $(join(["`:$(c.s)` $(round(c.rmse,digits=4))" for c in _clamp], " · ")). The choice is principled before it is measured — rectifying each voxel before averaging is a Jensen bias on any region mean drawn from the map, which is the same thing §6 refuses for the pooled decode. `:$(TV_SIMPLEX)` ships.
-
-## Held-out consequence (reported, not selected)
-
-λ was fixed above. This table only shows what the fitted λ does to the region-mean statistics §8 reports — λ=0 is the raw decode fig5 used to report in its place:
-
-| λ | f\\_w CCC | f\\_l CCC | f\\_p CCC | f\\_l slope | f\\_l RMSE |
-|---|---|---|---|---|---|
-$(_rows2)
-
-At the fitted λ=$(TV_LAMBDA), f\\_l CCC moves $(_dccc≥0 ? "+" : "")$(round(_dccc,digits=4)) vs the raw decode$(abs(_dccc)<0.002 ? " — **ROI-level accuracy is unchanged**" : _dccc<0 ? " — **a real ROI-level cost**, visible here and not hidden" : " — TV *improves* it"). Two facts make that unsurprising and worth stating: averaging ~$(round(Int,mean(r.nvox for r in drois))) core voxels is already a ≈$(round(Int,sqrt(mean(r.nvox for r in drois))))× denoiser, and it is handed the insert boundary for free — an oracle the delivered map never gets. So at ROI level there is little variance left for TV to remove and mostly bias for it to add, while the map at λ=0 is still filthy. **The map is the thing TV is for; the ROI table is the thing that proves it did not cheat.**
-""")
-end
 
 # ╔═╡ Cell order:
 # ╟─aaaa0002-0000-4000-8000-000000000002
@@ -1379,6 +1213,3 @@ end
 # ╟─aaaa0020-0000-4000-8000-000000000020
 # ╟─aaaa0021-0000-4000-8000-000000000021
 # ╟─aaaa0025-0000-4000-8000-000000000025
-# ╠═a50d883c-80a1-11f1-9e31-ef65a20a6d47
-# ╠═a50d90c0-80a1-11f1-b5e0-eb001c4d4cda
-# ╠═a50d987c-80a1-11f1-a3c3-6bd63bdcb70c
