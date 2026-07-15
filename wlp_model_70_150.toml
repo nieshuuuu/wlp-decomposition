@@ -1,11 +1,11 @@
 [provenance]
-test_ccc = [0.9956308588132271, 0.9969706595081688, 0.9980000465203323]
+test_ccc = [0.9936710635156678, 0.9951652284216849, 0.9969730016494821]
 source = "wlp_decomposition.jl"
-test_rmse = [0.02279056363565261, 0.018658266237535907, 0.0055586530693329805]
+test_rmse = [0.02753259897836252, 0.023615790581435828, 0.006795412256908555]
 chain = "80/140kVp EICT (:dd_fast) -> Cong water/iodine -> FBP 512px/380mm -> VMI 70_150 keV; stadium QRM-thorax"
 r2_fw_fit = 0.996394848687462
 test_n = 129
-test_slope = [0.9763547826917265, 0.9869700450948395, 0.9671652930368989]
+test_slope = [0.9817515158982885, 0.9888976013314285, 0.9540117607210473]
 cal_n = 52
 
 [calibration_table]
@@ -24,8 +24,9 @@ E_high_keV = 150.0
 
 [tv]
 eps = 0.04
-lambda_selected_by = "Pareto: per-voxel RMSE vs GT swept 0-100 on the circular calibration geometry, then held to the largest λ with no ROI-level cost (see λ sweep cell)"
-lambda = 3.0
+lambda_transfers = "NO. This lambda is supervised by phantom GT. On real CT with no GT, refit it GT-free at the same noise level (discrepancy principle against the sigma ladder, GCV, or SURE) — do not copy this number across scanners/dose"
+lambda_selected_by = "golden-section on log10(lambda) in [0.1,100], minimising per-voxel RMSE vs GT over the 4 CALIBRATION thoraxes only; held-out circular/sector scans never enter the objective"
+lambda = 12.12
 simplex = "once"
 iters = 25
 form = "coupled Huber-TV on (f_l,f_p); den = w + Σ_nbr λ/max(‖∇f‖,eps), w = 1/σ_f²"
