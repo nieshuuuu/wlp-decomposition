@@ -24,8 +24,9 @@ E_high_keV = 150.0
 
 [tv]
 eps = 0.04
-lambda_transfers = "NO. This lambda is supervised by phantom GT. On real CT with no GT, refit it GT-free at the same noise level (discrepancy principle against the sigma ladder, GCV, or SURE) — do not copy this number across scanners/dose"
-lambda_selected_by = "golden-section on log10(lambda) in [0.1,100], minimising per-voxel RMSE vs GT over the 4 CALIBRATION thoraxes only; held-out circular/sector scans never enter the objective"
+lambda_rule = "gt_oracle"
+lambda_transfers = "NO. Shipped lambda is supervised by phantom GT. GT-free rules (SURE white/correlated, discrepancy) were implemented and MEASURED on this phantom and all failed the 1.15x gate — SURE's divergence term is biased by the correlated noise (lag-1 ACF 0.45). Do not copy this number to another scanner/dose: refit on a phantom, or find a GT-free rule that passes the gate there."
+lambda_selected_by = "fitted on the 4 CALIBRATION thoraxes only (held-out circular/sector scans never enter any objective). Rules tried: GT-supervised per-voxel RMSE (golden-section, lambda=12.12); discrepancy chi2/N=1 full field (root NOT bracketed - chi2/N stays >1: residual is structure, not noise); discrepancy chi2/N=1 on cores (root NOT bracketed - chi2/N approaches 1 from below); MC-SURE correlated probe (lambda=4.42, x1.234); MC-SURE white probe (lambda=3.18, x1.491, risk goes NEGATIVE at 6/10 lambdas). Gate: ship a GT-free rule only if cost <= 1.15x oracle RMSE"
 lambda = 12.12
 simplex = "once"
 iters = 25
