@@ -583,6 +583,12 @@ begin
     #      bias is invisible to it. That is fine for choosing λ (TV cannot fix decode bias) but it
     #      means SURE ≈ GT only if the decode is near-unbiased on these compositions.
     # The phantom is the one place both can be checked: λ_SURE vs LAM_GT is the transfer evidence.
+    # SURE must be summed over the SAME voxels cal_pv_rmse scores, or the two objectives are simply
+    # measuring different regions and any disagreement is meaningless. TV still RUNS on the full
+    # field (a core voxel's neighbours matter); only the risk sum is restricted to the cores.
+    CALCORE = let m=falses(size(map_m2))
+        for k in 1:NHEART, I in core_idx(map_m2,ROD0-1+k,CORE_RPX); m[I]=true; end; m
+    end
     function sure_risk(lam; simplex=TV_SIMPLEX, seed=20260715)
         tot=0.0; n=0; rng=Random.MersenneTwister(seed)
         for s in CALPREP
@@ -592,7 +598,7 @@ begin
             bl=randn(rng,size(yl)); bp=randn(rng,size(yp))
             pl,pp = tv_coupled(yl.+εp.*bl, yp.+εp.*bp, gate; lambda=lam,w=s.P.w,simplex=simplex)
             @inbounds for I in CartesianIndices(yl)
-                gate[I] || continue
+                (gate[I] && CALCORE[I]) || continue
                 σl2=s.P.v.vl[I]; σp2=s.P.v.vp[I]
                 (isfinite(σl2) && isfinite(σp2)) || continue
                 tot += (xl[I]-yl[I])^2 + (xp[I]-yp[I])^2 - σl2 - σp2 +
