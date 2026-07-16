@@ -531,23 +531,36 @@ begin
     core_idx(m2,lab,rpx)=(idx=findall(==(UInt8(lab)),m2); isempty(idx) ? CartesianIndex{2}[] :
         (cx=mean(getindex.(idx,1));cy=mean(getindex.(idx,2)); [I for I in idx if (I[1]-cx)^2+(I[2]-cy)^2≤rpx^2]))
     _midz(v)=size(v,3)÷2+1
-    CALPREP=[(img=s, m2=map_m2, rpx=CORE_RPX, nins=NHEART,          # calibration scans share HEARTC geometry
-              P=let lo=s.hu_lo[:,:,_midz(s.hu_lo)], hi=s.hu_hi[:,:,_midz(s.hu_hi)], v=sigma_f_var(lo,hi)
-                    (f0=fullfield(lo,hi), v=v, w=map((a,b)->1.0/max(a+b,1e-6), v.vl, v.vp))
-                end)
-             for s in calsims]                                       # decode once; each λ only re-runs TV
+    # Per-scan prep, computed ONCE: the decode, σ_f, the TV weight, the gate, and the core index
+    # lists. core_idx is a findall over the whole 512² label map per insert — hoisting it out of the
+    # λ loop removes ~13 full-image scans per scan per λ evaluation. Every scan here shares HEARTC
+    # geometry, so the cores are identical; they are still stored per-scan to keep the loop uniform.
+    CALCORES = [core_idx(map_m2, ROD0-1+k, CORE_RPX) for k in 1:NHEART]
+    CALPREP  = Vector{Any}(undef, length(calsims))
+    Threads.@threads for i in eachindex(calsims)                     # 4 scans, 4 threads, no shared state
+        s = calsims[i]
+        lo = s.hu_lo[:,:,_midz(s.hu_lo)]; hi = s.hu_hi[:,:,_midz(s.hu_hi)]
+        v  = sigma_f_var(lo,hi); f0 = fullfield(lo,hi)
+        CALPREP[i] = (img=s, m2=map_m2, rpx=CORE_RPX, nins=NHEART, cores=CALCORES,
+                      P=(f0=f0, v=v, w=map((a,b)->1.0/max(a+b,1e-6), v.vl, v.vp), gate=.!isnan.(f0[2])))
+    end
+    # Threaded over scans and accumulated as per-scan partials — no shared vectors, so the result is
+    # identical to the serial sum (and independent of thread count), just ~nthreads× faster.
     function cal_pv_rmse(lam; simplex=TV_SIMPLEX)                    # per-voxel RMSE vs GT, CALIBRATION only
-        t=Float64[]; r=Float64[]
-        for s in CALPREP
-            gate=.!isnan.(s.P.f0[2])
-            fl,fp = lam≤0 ? (s.P.f0[2],s.P.f0[3]) : tv_coupled(s.P.f0[2],s.P.f0[3],gate; lambda=lam,w=s.P.w,simplex=simplex)
+        part = Vector{Tuple{Float64,Int}}(undef, length(CALPREP))
+        Threads.@threads for i in eachindex(CALPREP)
+            s = CALPREP[i]
+            fl,fp = lam≤0 ? (s.P.f0[2],s.P.f0[3]) :
+                    tv_coupled(s.P.f0[2],s.P.f0[3],s.P.gate; lambda=lam,w=s.P.w,simplex=simplex)
             F=(map((a,b)-> isnan(a) ? NaN : 1-a-b, fl,fp), fl, fp)
-            for k in 1:s.nins, I in core_idx(s.m2,ROD0-1+k,s.rpx), c in 1:3
+            se=0.0; n=0
+            for k in 1:s.nins, I in s.cores[k], c in 1:3
                 isfinite(F[c][I]) || continue
-                push!(t, s.img.comps[k][c]); push!(r, F[c][I])
+                se += (F[c][I]-s.img.comps[k][c])^2; n += 1
             end
+            part[i]=(se,n)
         end
-        sqrt(mean((r.-t).^2))
+        sqrt(sum(first.(part))/sum(last.(part)))
     end
     function golden_min(f,lo,hi; tol=0.02)                           # 1-D min of a unimodal f on [lo,hi]
         φ=(sqrt(5)-1)/2; a,b=lo,hi
@@ -634,11 +647,16 @@ begin
     # The probe is drawn CORRELATED, not white. Textbook (white) SURE was tried and returns a
     # NEGATIVE risk over most of the λ range here — impossible for an MSE, and exactly the sign the
     # algebra predicts once the noise is correlated. So the white variant is not offered as an option.
+    # Threaded like cal_pv_rmse, with one caveat that matters: the RNG is seeded PER SCAN, not shared.
+    # A shared stream would make the draws depend on thread interleaving and the estimate would stop
+    # being reproducible. Per-scan seeds keep it deterministic and independent of thread count.
     function sure_risk(lam; simplex=TV_SIMPLEX, seed=20260715)
-        tot=0.0; n=0; rng=Random.MersenneTwister(seed)
+        part = Vector{Tuple{Float64,Int}}(undef, length(CALPREP))
         σkx=_kwidth(acf_x[2]); σky=_kwidth(acf_y[2])
-        for s in CALPREP
-            yl=s.P.f0[2]; yp=s.P.f0[3]; gate=.!isnan.(yl)
+        Threads.@threads for i in eachindex(CALPREP)
+            s = CALPREP[i]; rng = Random.MersenneTwister(seed + i)
+            tot=0.0; n=0
+            yl=s.P.f0[2]; yp=s.P.f0[3]; gate=s.P.gate
             xl,xp = tv_coupled(yl,yp,gate; lambda=lam,w=s.P.w,simplex=simplex)
             # Draw b ~ N(0,Σ) with Σ = D^½ C D^½ (C = the measured ACF) and use tr(ΣJ) = E[bᵀJb],
             # with (Jb) ≈ (x̂(y+εb) − x̂(y))/ε. σ lives INSIDE b, so no σ² factor in the sum below.
@@ -655,13 +673,19 @@ begin
                        2*(bl[I]*(pl[I]-xl[I]) + bp[I]*(pp[I]-xp[I]))/εp     # ... + 2 tr(ΣJ)
                 n += 2
             end
+            part[i]=(tot,n)
         end
-        tot/n                                        # ≈ per-component MSE (may go negative: unbiased ⇒ noisy)
+        sum(first.(part))/sum(last.(part))           # ≈ per-component MSE (may go negative: unbiased ⇒ noisy)
     end
+    # SURE costs 2 TV solves per scan per λ (x̂(y) and x̂(y+εb)), so golden-sectioning it to 5% cost
+    # ~110 TV solves — for a REFERENCE that does not ship. A coarse log grid resolves "what would a
+    # GT-free rule have picked" perfectly well; λ_SURE's precision is the grid spacing, and is quoted
+    # as such. The shipped λ_GT still gets the golden section, because it is the one that matters.
     # Report the SIGNED risk: a negative estimate is impossible for a true MSE, so clipping it to 0
     # would hide the estimator failing. §6.5 checks the sign rather than assuming it.
-    _gold_sure = golden_min(u->sure_risk(10.0^u), -1.0, 2.0; tol=0.02)
-    LAM_SURE   = round(10.0^_gold_sure.x, digits=2)      # GT-free reference; does NOT ship
+    SURE_GRID  = [1.0,2.0,4.0,8.0,16.0,32.0]
+    sure_curve = [sure_risk(l) for l in SURE_GRID]
+    LAM_SURE   = SURE_GRID[argmin(sure_curve)]           # GT-free reference; does NOT ship
 
     # SURE is what ships: it is computable on a patient, where LAM_GT is not. LAM_GT stays as the
     # phantom's verdict on whether that was allowed — quantified as the RMSE actually paid for using
@@ -694,24 +718,36 @@ begin
     # Every scan reuses its geometry's label map (only comps differ per scan), so the cores are
     # recoverable from the stored images; the asserts below pin this to the cached n.
     # These are REPORTED, never optimised against — λ was already fixed above, on calibration.
-    TESTSIMS=vcat([(img=s,m2=map_m2, rpx=CORE_RPX,nins=NHEART,geom=:circular) for s in testsims],
-                  [(img=s,m2=smap_m2,rpx=7,       nins=NSECT, geom=:sector)   for s in sectsims])
+    # Same hoisting as CALPREP: the decode, σ_f weight, gate and core lists do not depend on λ, so
+    # they are computed once per scan. score_rois is called once per λ by the §6.5 sweep — leaving
+    # fullfield in the λ loop meant re-decoding 9 × 512² on every evaluation.
+    SECT_CORES = [core_idx(smap_m2, ROD0-1+k, 7) for k in 1:NSECT]
+    TESTSIMS=vcat([(img=s,m2=map_m2, rpx=CORE_RPX,nins=NHEART,geom=:circular,cores=CALCORES)   for s in testsims],
+                  [(img=s,m2=smap_m2,rpx=7,       nins=NSECT, geom=:sector,  cores=SECT_CORES) for s in sectsims])
+    TESTPREP = Vector{Any}(undef, length(TESTSIMS))
+    Threads.@threads for i in eachindex(TESTSIMS)
+        s = TESTSIMS[i]
+        lo=s.img.hu_lo[:,:,_midz(s.img.hu_lo)]; hi=s.img.hu_hi[:,:,_midz(s.img.hu_hi)]
+        f0=fullfield(lo,hi)
+        TESTPREP[i] = (; s..., P=(f0=f0, gate=.!isnan.(f0[2]), w=sigma_f_weight(lo,hi)))
+    end
     function score_rois(; lambda=TV_LAMBDA, simplex=TV_SIMPLEX)
-        out=NamedTuple[]
-        for s in TESTSIMS
-            m_lo=s.img.hu_lo[:,:,_midz(s.img.hu_lo)]; m_hi=s.img.hu_hi[:,:,_midz(s.img.hu_hi)]
-            f0=fullfield(m_lo,m_hi); gate=.!isnan.(f0[2]); w=sigma_f_weight(m_lo,m_hi)
-            fl,fp = lambda≤0 ? (f0[2],f0[3]) : tv_coupled(f0[2],f0[3],gate; lambda=lambda,w=w,simplex=simplex)
+        parts = Vector{Vector{NamedTuple}}(undef, length(TESTPREP))
+        Threads.@threads for i in eachindex(TESTPREP)
+            s = TESTPREP[i]; o = NamedTuple[]
+            fl,fp = lambda≤0 ? (s.P.f0[2],s.P.f0[3]) :
+                    tv_coupled(s.P.f0[2],s.P.f0[3],s.P.gate; lambda=lambda,w=s.P.w,simplex=simplex)
             D=(map((a,b)-> isnan(a) ? NaN : 1-a-b, fl,fp), fl, fp)
             for k in 1:s.nins
-                ci=core_idx(s.m2,ROD0-1+k,s.rpx); isempty(ci)&&continue
+                ci=s.cores[k]; isempty(ci)&&continue
                 v=[Float64[D[c][I] for I in ci if isfinite(D[c][I])] for c in 1:3]
                 any(isempty,v) && continue
-                push!(out,(geom=s.geom, t=s.img.comps[k], p=ntuple(c->mean(v[c]),3),
-                           sem=ntuple(c->std(v[c])/sqrt(length(v[c])),3), nvox=length(v[1])))
+                push!(o,(geom=s.geom, t=s.img.comps[k], p=ntuple(c->mean(v[c]),3),
+                         sem=ntuple(c->std(v[c])/sqrt(length(v[c])),3), nvox=length(v[1])))
             end
+            parts[i]=o
         end
-        out
+        reduce(vcat, parts)                          # parts is index-ordered ⇒ same order as serial
     end
     drois=score_rois()
     @assert length(drois)==length(allrois) "scorer found $(length(drois)) ROIs; cached rois have $(length(allrois))"
@@ -834,11 +870,15 @@ begin
     LAMS=[0.3,1.0,3.0,5.0,10.0,15.0,20.0,30.0,50.0,100.0]
     cal_curve  = [cal_pv_rmse(l) for l in LAMS]
     cal_mse    = cal_curve.^2                                    # SURE estimates MSE — compare like with like
-    sure_c     = [sure_risk(l) for l in LAMS]                    # GT-free reference (correlated probe)
-    _tag(l)= l==TV_LAMBDA ? " ← **ships**" : l==LAM_SURE ? " ← SURE argmin (reference)" : ""
-    _rows=join(["| $(l) | $(round(cal_curve[i],digits=4)) | $(round(cal_mse[i],digits=5)) | $(round(sure_c[i],digits=5)) |$(_tag(l))"
+    # The SURE curve is NOT recomputed here — §6 already evaluated it on SURE_GRID to pick LAM_SURE,
+    # and SURE costs 2 TV solves per scan per λ. One curve, one home, displayed twice.
+    _tag(l)= l==TV_LAMBDA ? " ← **ships**" : ""
+    _rows=join(["| $(l) | $(round(cal_curve[i],digits=4)) | $(round(cal_mse[i],digits=5)) |$(_tag(l))"
                 for (i,l) in enumerate(LAMS)],"\n")
-    _neg_c = count(<(0), sure_c)                                 # a negative MSE estimate = broken
+    _srows=join(["| $(l) | $(round(sure_curve[i],digits=5)) |$(l==LAM_SURE ? " ← SURE argmin (reference)" : "")"
+                 for (i,l) in enumerate(SURE_GRID)],"\n")
+    _neg_c = count(<(0), sure_curve)                             # a negative MSE estimate = broken
+    _ss = sort(sure_curve); _s1, _s2 = _ss[1], _ss[2]            # basin depth: min vs runner-up
 
     # (5) Clamp schedule — also decided on calibration, and by a principle: never rectify per-voxel
     # before averaging (Jensen). The measurement only confirms what §6 already refuses.
@@ -875,11 +915,19 @@ begin
 
 Its probe is drawn **correlated**, not white: our own ACF says lag-1 = $(round(acf_x[2],digits=2)), so the divergence term must be tr(ΣJ), not σ²tr(J). (Textbook white-noise SURE returns a *negative* risk over most of this λ range — impossible for an MSE, and the exact sign the algebra predicts once the noise is correlated. It is not offered as an option.)
 
-| λ | per-voxel RMSE (GT) | true MSE (GT) | SURE risk (GT-free) | |
-|---|---|---|---|---|
+| λ | per-voxel RMSE (GT) | true MSE (GT) | |
+|---|---|---|---|
 $(_rows)
 
-Sanity check on the reference: SURE's risk is negative at **$(_neg_c)/$(length(LAMS))** λ values (0 = physical throughout).
+The SURE reference, on its own grid (§6 evaluates it there to pick λ_SURE; it costs 2 TV solves per scan per λ, so it is resolved to the grid spacing and quoted as such — precision no one spends, since it does not ship):
+
+| λ | SURE risk (GT-free) | |
+|---|---|---|
+$(_srows)
+
+Sanity check on the reference: SURE's risk is negative at **$(_neg_c)/$(length(SURE_GRID))** λ values (0 = physical throughout — a negative risk estimate would mean the estimator is broken, as the white-noise probe was).
+
+**Do not over-read λ_SURE.** It is a **one-probe** Monte-Carlo estimate and the basin it sits in is shallow — here $(round(_s1,digits=5)) at λ=$(LAM_SURE) versus $(round(_s2,digits=5)) at the runner-up, a gap of only ~$(round(Int,100*(_s2/_s1-1)))%. Re-seeding the probe moves the argmin by a factor of ~2 (it landed on 4.4 under a different seed, costing ×1.23 instead of ×$(round(_sure_cost,digits=2))). So the reference says **"a GT-free rule lands in the same order of magnitude and under-smooths"** — it does not pin a number. Averaging K probes would shrink that spread by √K at K× the cost; not spent, because the reference does not ship.
 
 | rule | GT-free? | λ | per-voxel RMSE | vs oracle |
 |---|---|---|---|---|
@@ -1305,7 +1353,7 @@ only for linear/FBP recon, so a clinical DLIR/QIR transfer must re-earn it empir
 # ╟─aaaa0029-0000-4000-8000-000000000029
 # ╟─aaaa0009-0000-4000-8000-000000000009
 # ╟─aaaa0010-0000-4000-8000-000000000010
-# ╠═aaaa0030-0000-4000-8000-000000000030
+# ╟─aaaa0030-0000-4000-8000-000000000030
 # ╟─aaaa0011-0000-4000-8000-000000000011
 # ╠═aaaa0012-0000-4000-8000-000000000012
 # ╟─aaaa0013-0000-4000-8000-000000000013
