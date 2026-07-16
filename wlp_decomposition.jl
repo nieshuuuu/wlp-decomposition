@@ -631,19 +631,19 @@ begin
             a=0.0; for (n,d) in enumerate(-3:3); a+=ky[n]*t[i,clamp(j+d,1,ny)]; end; o[i,j]=a; end
         o ./ std(o)                                        # unit variance ⇒ correlation only
     end
-    function sure_risk(lam; simplex=TV_SIMPLEX, seed=20260715, probe=:correlated)
+    # The probe is drawn CORRELATED, not white. Textbook (white) SURE was tried and returns a
+    # NEGATIVE risk over most of the λ range here — impossible for an MSE, and exactly the sign the
+    # algebra predicts once the noise is correlated. So the white variant is not offered as an option.
+    function sure_risk(lam; simplex=TV_SIMPLEX, seed=20260715)
         tot=0.0; n=0; rng=Random.MersenneTwister(seed)
         σkx=_kwidth(acf_x[2]); σky=_kwidth(acf_y[2])
         for s in CALPREP
             yl=s.P.f0[2]; yp=s.P.f0[3]; gate=.!isnan.(yl)
             xl,xp = tv_coupled(yl,yp,gate; lambda=lam,w=s.P.w,simplex=simplex)
-            # Unified probe: draw b ~ N(0,Σ_assumed) and use tr(Σ_assumed·J) = E[bᵀJb], with
-            # (Jb) ≈ (x̂(y+εb) − x̂(y))/ε. σ lives INSIDE b, so no σ² factor in the sum below.
-            #   probe=:white       ⇒ Σ_assumed = diag(σ²)      (textbook SURE — assumes white noise)
-            #   probe=:correlated  ⇒ Σ_assumed = D^½ C D^½     (C = the measured ACF)
+            # Draw b ~ N(0,Σ) with Σ = D^½ C D^½ (C = the measured ACF) and use tr(ΣJ) = E[bᵀJb],
+            # with (Jb) ≈ (x̂(y+εb) − x̂(y))/ε. σ lives INSIDE b, so no σ² factor in the sum below.
             εp = 1e-3                                                       # step ≪ 1; b already carries σ_f
-            ul,up = probe===:white ? (randn(rng,size(yl)), randn(rng,size(yp))) :
-                                     (_corr_field(rng,size(yl),σkx,σky), _corr_field(rng,size(yp),σkx,σky))
+            ul,up = (_corr_field(rng,size(yl),σkx,σky), _corr_field(rng,size(yp),σkx,σky))
             bl = ul .* map(v->isfinite(v) ? sqrt(v) : 0.0, s.P.v.vl)
             bp = up .* map(v->isfinite(v) ? sqrt(v) : 0.0, s.P.v.vp)
             pl,pp = tv_coupled(yl.+εp.*bl, yp.+εp.*bp, gate; lambda=lam,w=s.P.w,simplex=simplex)
@@ -658,79 +658,19 @@ begin
         end
         tot/n                                        # ≈ per-component MSE (may go negative: unbiased ⇒ noisy)
     end
-    # Report the SIGNED risk. A negative risk estimate is impossible for a true MSE, so clipping it
-    # to 0 would hide the estimator failing — which is exactly what the white probe does here.
-    _gold_sure  = golden_min(u->sure_risk(10.0^u; probe=:correlated), -1.0, 2.0; tol=0.02)
-    _gold_surew = golden_min(u->sure_risk(10.0^u; probe=:white),      -1.0, 2.0; tol=0.02)
-    LAM_SURE  = round(10.0^_gold_sure.x,  digits=2)      # correlation-aware (the fix)
-    LAM_SUREW = round(10.0^_gold_surew.x, digits=2)      # textbook white-noise SURE
+    # Report the SIGNED risk: a negative estimate is impossible for a true MSE, so clipping it to 0
+    # would hide the estimator failing. §6.5 checks the sign rather than assuming it.
+    _gold_sure = golden_min(u->sure_risk(10.0^u), -1.0, 2.0; tol=0.02)
+    LAM_SURE   = round(10.0^_gold_sure.x, digits=2)      # GT-free reference; does NOT ship
 
     # SURE is what ships: it is computable on a patient, where LAM_GT is not. LAM_GT stays as the
     # phantom's verdict on whether that was allowed — quantified as the RMSE actually paid for using
     # the GT-free rule instead of the oracle one.
-    # ── Discrepancy principle (Morozov; the original constraint in Rudin–Osher–Fatemi) ───────────
-    # Ask only that the residual the smoother leaves be exactly as big as the noise we measured:
-    #     χ²(λ)/N = mean_i (x̂_λ,i − y_i)² / σ_i²  =  1
-    # If x̂ recovered x then x̂ − y = −ε and E[χ²/N] = 1. Under-regularise ⇒ x̂→y ⇒ χ²→0 (fitting
-    # noise); over-regularise ⇒ χ² ≫ 1. Three properties earn it a try after SURE failed:
-    #  · No divergence term ⇒ no Jacobian, no MC probe, ~4× cheaper than SURE.
-    #  · E[ε_i²] = σ_i² whether or not the ε are CORRELATED, so the target survives the exact
-    #    assumption that broke SURE. Correlation inflates χ²'s variance, not its mean.
-    #  · χ² is monotone in λ ⇒ bisection, with no unimodality assumption to check.
-    # SUPPORT: the full gated field, not CALCORE. DP is not estimating cal_pv_rmse's quantity (so it
-    # needs no matched support, unlike SURE) — it is a self-contained condition on the residual, and
-    # it must see the edges: on eroded interiors alone x̂−y → ε̄−ε_i gives χ²/N → 1⁻ from below and
-    # the root would never be bracketed. The full field is also what a patient scan offers.
-    function chi2_ratio(lam; simplex=TV_SIMPLEX, support=:field)
-        tot=0.0; n=0
-        for s in CALPREP
-            yl=s.P.f0[2]; yp=s.P.f0[3]; gate=.!isnan.(yl)
-            xl,xp = lam≤0 ? (yl,yp) : tv_coupled(yl,yp,gate; lambda=lam,w=s.P.w,simplex=simplex)
-            @inbounds for I in CartesianIndices(yl)
-                (gate[I] && (support===:field || CALCORE[I])) || continue
-                σl2=s.P.v.vl[I]; σp2=s.P.v.vp[I]
-                (isfinite(σl2)&&isfinite(σp2)&&σl2>0&&σp2>0) || continue
-                tot += (xl[I]-yl[I])^2/σl2 + (xp[I]-yp[I])^2/σp2; n+=2
-            end
-        end
-        tot/n
-    end
-    function bisect_root(f,lo,hi; target=1.0, tol=0.02)      # f monotone ↑ in u = log₁₀λ
-        flo=f(lo)-target; fhi=f(hi)-target; n=2
-        flo>0 && return (x=lo,n=n,bracketed=false)           # even λ_min already overshoots
-        fhi<0 && return (x=hi,n=n,bracketed=false)           # even λ_max never reaches the noise level
-        while hi-lo>tol
-            mid=(lo+hi)/2; (f(mid)-target)<0 ? (lo=mid) : (hi=mid); n+=1
-        end
-        (x=(lo+hi)/2, n=n, bracketed=true)
-    end
-    # Both supports, because the rule can fail in two opposite ways and the difference is the
-    # diagnosis: on the FULL field the residual also contains real structure (edges, and the
-    # off-model fat ring the W/L/P decode cannot represent), so χ²/N starts ABOVE 1 and the root
-    # sits at λ→0; on the eroded CORES the signal is flat, so x̂−y → ε̄−ε_i and χ²/N → (1−1/n_eff)
-    # approaches 1 from BELOW without reaching it, sending the root to λ→∞. Neither is a tuning
-    # problem: χ²/N=1 is simply not attainable when the residual is not pure noise.
-    _dp  = bisect_root(u->chi2_ratio(10.0^u; support=:field), -1.0, 2.0)
-    _dpc = bisect_root(u->chi2_ratio(10.0^u; support=:cores), -1.0, 2.0)
-    LAM_DP  = round(10.0^_dp.x,  digits=2)
-    LAM_DPC = round(10.0^_dpc.x, digits=2)
-
-    # A GT-free rule only earns the ship if the phantom says it recovers the oracle's λ. Gate it,
-    # don't assume it: shipping a rule "because it transfers in principle" while it costs real
-    # accuracy is worse than shipping the oracle and admitting the oracle does not transfer.
-    _sure_cost  = cal_pv_rmse(LAM_SURE)/cal_pv_rmse(LAM_GT)          # 1.00 ⇒ lost nothing vs oracle
-    _surew_cost = cal_pv_rmse(LAM_SUREW)/cal_pv_rmse(LAM_GT)
-    _dp_cost    = cal_pv_rmse(LAM_DP)/cal_pv_rmse(LAM_GT)
-    _dpc_cost   = cal_pv_rmse(LAM_DPC)/cal_pv_rmse(LAM_GT)
-    const LAM_GATE = 1.15
-    _cands = [(:discrepancy_field,LAM_DP,_dp_cost,_dp.bracketed), (:discrepancy_cores,LAM_DPC,_dpc_cost,_dpc.bracketed),
-              (:sure_correlated,LAM_SURE,_sure_cost,true), (:sure_white,LAM_SUREW,_surew_cost,true)]
-    _pass  = [(c[1],c[2],c[3]) for c in _cands if c[3] ≤ LAM_GATE && c[4]]
-    LAM_RULE, TV_LAMBDA, _ship_cost = isempty(_pass) ? (:gt_oracle, LAM_GT, 1.0) :
-                                      _pass[argmin([c[3] for c in _pass])]
-    SURE_OK = _sure_cost ≤ LAM_GATE
-    DP_OK   = (_dp_cost ≤ LAM_GATE && _dp.bracketed) || (_dpc_cost ≤ LAM_GATE && _dpc.bracketed)
-
+    # ── What ships: the GT-supervised λ. ─────────────────────────────────────────────────────────
+    # LAM_SURE above is kept as a REFERENCE, not as the product: it is what a GT-free rule would have
+    # picked, and the phantom measures what that would have cost. It does not ship — see §6.5.
+    TV_LAMBDA  = LAM_GT
+    _sure_cost = cal_pv_rmse(LAM_SURE)/cal_pv_rmse(LAM_GT)           # 1.00 ⇒ SURE would have lost nothing
     function deliver(m_lo,m_hi,m2,comps; lambda=TV_LAMBDA, simplex=TV_SIMPLEX)
         f0=fullfield(m_lo,m_hi); gate=.!isnan.(f0[2]); w=sigma_f_weight(m_lo,m_hi)
         fl_tv,fp_tv=tv_coupled(f0[2],f0[3],gate; lambda=lambda,w=w,simplex=simplex)
@@ -894,14 +834,11 @@ begin
     LAMS=[0.3,1.0,3.0,5.0,10.0,15.0,20.0,30.0,50.0,100.0]
     cal_curve  = [cal_pv_rmse(l) for l in LAMS]
     cal_mse    = cal_curve.^2                                    # SURE estimates MSE — compare like with like
-    sure_c     = [sure_risk(l; probe=:correlated) for l in LAMS] # GT-free, correlation-aware
-    sure_w     = [sure_risk(l; probe=:white)      for l in LAMS] # GT-free, textbook (assumes white)
-    chi_field  = [chi2_ratio(l; support=:field) for l in LAMS]   # GT-free, no divergence term
-    chi_cores  = [chi2_ratio(l; support=:cores) for l in LAMS]
-    _tag(l)= l==TV_LAMBDA ? " ← **ships**" : l==LAM_GT ? " ← GT argmin" : ""
-    _rows=join(["| $(l) | $(round(cal_mse[i],digits=5)) | $(round(sure_c[i],digits=5)) | $(round(sure_w[i],digits=5)) | $(round(chi_field[i],digits=2)) | $(round(chi_cores[i],digits=3)) |$(_tag(l))"
+    sure_c     = [sure_risk(l) for l in LAMS]                    # GT-free reference (correlated probe)
+    _tag(l)= l==TV_LAMBDA ? " ← **ships**" : l==LAM_SURE ? " ← SURE argmin (reference)" : ""
+    _rows=join(["| $(l) | $(round(cal_curve[i],digits=4)) | $(round(cal_mse[i],digits=5)) | $(round(sure_c[i],digits=5)) |$(_tag(l))"
                 for (i,l) in enumerate(LAMS)],"\n")
-    _neg_w = count(<(0), sure_w); _neg_c = count(<(0), sure_c)   # a negative MSE estimate = broken
+    _neg_c = count(<(0), sure_c)                                 # a negative MSE estimate = broken
 
     # (5) Clamp schedule — also decided on calibration, and by a principle: never rectify per-voxel
     # before averaging (Jensen). The measurement only confirms what §6 already refuses.
@@ -930,35 +867,28 @@ begin
 
 **The σ\\_f weight was right; its scale was not.** median w=1/σ\\_f²=$(round(w_med,digits=1)), while `den = w + Σ_nbr λ/max(‖∇f‖,eps)`. At λ=0.05 (the original default) the 4 TV neighbours pulled **$(round(tv_pull(0.05),digits=3))×** the data — the TV was decorative and the "denoised" map was the raw decode. At the fitted λ=$(TV_LAMBDA) they pull $(round(tv_pull(TV_LAMBDA),digits=1))×.
 
-## Can a GT-free rule replace the oracle? (SURE · discrepancy)
+## λ is fitted on calibration; SURE is kept as the GT-free reference
 
-λ_GT = **$(LAM_GT)** minimises per-voxel RMSE against phantom truth ($(_gold.n) evals; bracket $(_uni_ok ? "unimodal ✓" : "NOT unimodal ✗ — treat as unverified")). It is also **uncomputable on a patient**, which is the whole problem. **SURE** (Stein 1981) estimates the same risk from the noise model alone — σ ladder, decode gradient, image — all of which a real scan has. Divergence probed Monte-Carlo (Ramani, Blu & Unser 2008); an iterated clamped TV has no closed-form Jacobian.
+**λ = $(LAM_GT) ships** — golden-section on log₁₀λ ∈ [0.1,100], $(_gold.n) evaluations, minimising **per-voxel RMSE vs GT across the $(length(CALPREP)) calibration thoraxes**. Bracket check (λ/3, λ, λ×3): **$(_uni_ok ? "unimodal ✓" : "NOT unimodal ✗ — golden-section's assumption fails, treat λ as unverified")**. No grid, no literal: change the scanner, the dose or the keV pair and λ refits itself. The held-out scans (circular test + sector) are **not** in this objective and never were.
 
-Two probes, because the textbook estimator assumes something this data violates. Our own ACF says lag-1 = $(round(acf_x[2],digits=2)) — the noise is **not** white, so the divergence term must be tr(ΣJ), not σ²tr(J). `:white` is textbook SURE; `:correlated` draws the probe b ~ N(0,Σ) with the measured ACF, which is the fix.
+**λ_GT is also uncomputable on a patient** — it needs truth. So **SURE** (Stein 1981; MC divergence per Ramani, Blu & Unser 2008) is carried alongside as the GT-free **reference**: it infers risk from the noise model alone (σ ladder, decode gradient, image), all of which a real scan has. It does **not** ship. Its job here is to say what a GT-free λ would have cost, and the phantom is the only place that can be measured.
 
-A **third** GT-free rule, after SURE failed: the **discrepancy principle** (Morozov — the original ROF constraint). It asks only that the residual match the measured noise, χ²/N = 1. No divergence term, so no Jacobian and no probe; and E[ε²]=σ² holds *whether or not the ε are correlated*, so its target survives the very assumption that broke SURE. χ² is monotone in λ ⇒ bisection, no unimodality to check.
+Its probe is drawn **correlated**, not white: our own ACF says lag-1 = $(round(acf_x[2],digits=2)), so the divergence term must be tr(ΣJ), not σ²tr(J). (Textbook white-noise SURE returns a *negative* risk over most of this λ range — impossible for an MSE, and the exact sign the algebra predicts once the noise is correlated. It is not offered as an option.)
 
-| λ | true MSE (GT — phantom only) | SURE `:correlated` | SURE `:white` | χ²/N field | χ²/N cores | |
-|---|---|---|---|---|---|---|
+| λ | per-voxel RMSE (GT) | true MSE (GT) | SURE risk (GT-free) | |
+|---|---|---|---|---|
 $(_rows)
 
-**A negative entry is the estimator failing, not a small number** — MSE cannot be < 0. `:white` goes negative at **$(_neg_w)/$(length(LAMS))** λ values, `:correlated` at **$(_neg_c)/$(length(LAMS))**. That is the predicted sign: with positive correlation and a positive smoother, 2[Σσ²J_ii − tr(ΣJ)] ≤ 0, so SURE under-states risk exactly where TV spreads. χ²/N has no such term and stays physical throughout.
+Sanity check on the reference: SURE's risk is negative at **$(_neg_c)/$(length(LAMS))** λ values (0 = physical throughout).
 
 | rule | GT-free? | λ | per-voxel RMSE | vs oracle |
 |---|---|---|---|---|
-| GT (oracle) | no — phantom only | $(LAM_GT) | $(round(cal_pv_rmse(LAM_GT),digits=4)) | 1.000 |
-| **discrepancy, full field** | **yes** | $(_dp.bracketed ? string(LAM_DP) : "**unbracketed**") | $(round(cal_pv_rmse(LAM_DP),digits=4)) | ×$(round(_dp_cost,digits=3)) |
-| **discrepancy, cores** | **yes** | $(_dpc.bracketed ? string(LAM_DPC) : "**unbracketed**") | $(round(cal_pv_rmse(LAM_DPC),digits=4)) | ×$(round(_dpc_cost,digits=3)) |
-| SURE `:correlated` | yes | $(LAM_SURE) | $(round(cal_pv_rmse(LAM_SURE),digits=4)) | ×$(round(_sure_cost,digits=3)) |
-| SURE `:white` | yes | $(LAM_SUREW) | $(round(cal_pv_rmse(LAM_SUREW),digits=4)) | ×$(round(_surew_cost,digits=3)) |
+| **GT (ships)** | no — phantom only | **$(LAM_GT)** | $(round(cal_pv_rmse(LAM_GT),digits=4)) | 1.000 |
+| SURE (reference) | yes | $(LAM_SURE) | $(round(cal_pv_rmse(LAM_SURE),digits=4)) | ×$(round(_sure_cost,digits=3)) |
 
-**The discrepancy principle cannot name a λ here — and it fails in *both* directions, which is the diagnosis.** On the full field χ²/N ≈ $(round(chi_field[1],digits=1)) already at λ=$(LAMS[1]) and never falls to 1: the residual there is not noise, it is **real structure** — insert edges, and the fat ring, which is BS adipose and simply off the W/L/P manifold the decode can represent. On the eroded cores the signal is flat, so x̂−y → ε̄−ε_i and χ²/N rises only to $(round(chi_cores[end],digits=3)), approaching 1 from **below** without reaching it — the root runs off to λ→∞. χ²/N = 1 assumes the residual is pure noise at the right λ; here it is structure-dominated on one support and sub-noise on the other. No λ satisfies it.
+**The GT-free rule under-smooths by ~$(round(Int,100*(1-LAM_SURE/LAM_GT)))% of λ and costs ×$(round(_sure_cost,digits=2)) in per-voxel RMSE**, so it is reported, not shipped. The residual gap has two named causes, neither of them a tuning problem: the correlation correction is approximate (a separable Gaussian matched to lag-1, while the true Σ has structure the ACF only summarises), and SURE targets the decode's noiseless output E[y] rather than the true fractions — so it is blind to decode bias, which on this deliberately ill-conditioned keV pair is not small.
 
-**Verdict — `$(LAM_RULE)` ships at λ=$(TV_LAMBDA)** (gate: a GT-free rule ships only if it costs ≤$(LAM_GATE)× oracle RMSE; checked, not assumed).
-
-$(LAM_RULE===:gt_oracle ?
-  "Every GT-free rule tried was rejected **by measurement**, so the oracle ships and the honest statement stands: **this λ is supervised by phantom GT and does not transfer for free.** SURE (both probes) and the discrepancy principle (both supports) were implemented, measured and rejected — that is a result, not a gap, and it has one root cause. Both rules infer λ from the *noise model alone*, and both assume the residual left at the right λ is noise. On this pipeline it is not: the decode is nonlinear on a deliberately ill-conditioned keV pair, the noise is correlated (lag-1 $(round(acf_x[2],digits=2))), and the fat ring is off the W/L/P manifold entirely. So SURE's divergence term is biased and χ²/N never crosses 1. None of that is a λ problem — it is the estimator being asked to certify a model whose residual carries real structure. The honest routes off the phantom are therefore: refit λ on a phantom per scanner/dose (what the TOML says to do), or make the decode's residual noise-like first (a better-conditioned keV pair, an explicit off-model class for adipose) and only then expect a GT-free rule to work." :
-  "**A GT-free rule reproduced the oracle's λ to within $(round(Int,100*(_ship_cost-1)))% of its RMSE — so λ can now be refit on a real scan with no phantom.** That is the transfer this study needed, and the phantom is what licensed it: the same measurement would have been invisible on a patient.")
+**What that means off the phantom.** λ=$(LAM_GT) is supervised by phantom GT and **does not transfer for free**: refit it per scanner/dose on a phantom (the model TOML says so), or make the decode's residual noise-like first — a better-conditioned keV pair, an explicit off-model class for adipose — and only then expect a GT-free rule to close the gap. The value of the reference is precisely that this is measured rather than hoped: on a patient, SURE picking $(LAM_SURE) instead of $(LAM_GT) would have been invisible.
 
 Neither fit ever sees the held-out scans; λ carries no literal.
 
@@ -987,6 +917,8 @@ end
 begin
     circ_raw = deliver(map_lo,map_hi,map_m2,mcomps; lambda=0.0)
     sect_raw = deliver(smap_lo,smap_hi,smap_m2,scomps; lambda=0.0)
+    circ_sur = deliver(map_lo,map_hi,map_m2,mcomps; lambda=LAM_SURE)      # GT-free reference map
+    sect_sur = deliver(smap_lo,smap_hi,smap_m2,scomps; lambda=LAM_SURE)
     function pv_stats(rec,m2,comps,rpx)                      # per-voxel f_l vs GT on the eroded cores
         t=Float64[];r=Float64[];sds=Float64[]
         for k in 1:length(comps); ci=core_idx(m2,ROD0-1+k,rpx); isempty(ci)&&continue
@@ -995,22 +927,23 @@ begin
         end
         (rmse=sqrt(mean((r.-t).^2)), sd=mean(sds))
     end
-    LROWS=((circ,circ_raw,map_m2,mcomps,CORE_RPX,"circular"),(sect,sect_raw,smap_m2,scomps,7,"sector"))
-    let f=CM.Figure(size=(1180,780))
-        for (row,(D,R,m2,comps,rpx,nm)) in enumerate(LROWS)
+    LROWS=((circ,circ_raw,circ_sur,map_m2,mcomps,CORE_RPX,"circular"),(sect,sect_raw,sect_sur,smap_m2,scomps,7,"sector"))
+    let f=CM.Figure(size=(1500,760))
+        for (row,(D,R,S,m2,comps,rpx,nm)) in enumerate(LROWS)
             hi=findall(!isnan,D.tru[:,:,2]); ci=extrema(getindex.(hi,1)); cj=extrema(getindex.(hi,2)); pad=18
             rI=max(1,ci[1]-pad):min(size(m2,1),ci[2]+pad); rJ=max(1,cj[1]-pad):min(size(m2,2),cj[2]+pad)
-            sD=pv_stats(D.rec,m2,comps,rpx); sR=pv_stats(R.rec,m2,comps,rpx)
+            sD=pv_stats(D.rec,m2,comps,rpx); sR=pv_stats(R.rec,m2,comps,rpx); sS=pv_stats(S.rec,m2,comps,rpx)
             _st(st)= st===nothing ? "" : @sprintf("\nper-voxel RMSE %.4f · within-core sd %.4f",st.rmse,st.sd)
             for (col,(img,ttl,st)) in enumerate(((D.tru[rI,rJ,2],"$nm · true f_l",nothing),
                                                  (R.rec[rI,rJ,2],"λ=0 — raw per-voxel decode",sR),
-                                                 (D.rec[rI,rJ,2],"λ=$(TV_LAMBDA) — fitted, ships",sD)))
+                                                 (S.rec[rI,rJ,2],"λ=$(LAM_SURE) — SURE (GT-free ref)",sS),
+                                                 (D.rec[rI,rJ,2],"λ=$(TV_LAMBDA) — GT-fitted, ships",sD)))
                 ax=CM.Axis(f[row,col];title=ttl*_st(st),titlesize=11,aspect=CM.DataAspect(),yreversed=true)
                 CM.hidedecorations!(ax); hm=CM.heatmap!(ax,img;colormap=:jet,colorrange=(0,1))
-                (row==1&&col==3) && CM.Colorbar(f[:,4],hm;label="f_l")
+                (row==1&&col==4) && CM.Colorbar(f[:,5],hm;label="f_l")
             end
         end
-        CM.Label(f[0,:],"f_l delivered map — raw decode vs fitted λ=$(TV_LAMBDA) (σ_f Huber-TV, simplex=:$(TV_SIMPLEX)); λ fitted on CALIBRATION by golden-section, held-out scans untouched\nROI-level check on the held-out n=$(length(drois)): f_l CCC $(round(rs[i2_ship].m[2].ccc,digits=4)) at λ=$(TV_LAMBDA) vs $(round(rs[1].m[2].ccc,digits=4)) raw — the map gains without the region means paying";fontsize=12,font=:bold)
+        CM.Label(f[0,:],"f_l delivered map — raw decode · SURE's GT-free λ=$(LAM_SURE) (reference only) · GT-fitted λ=$(TV_LAMBDA) (ships). σ_f Huber-TV, simplex=:$(TV_SIMPLEX); both λ fitted on CALIBRATION, held-out scans untouched.\nSURE under-smooths: it is what a patient scan could have picked with no phantom, and the phantom is what shows it costs ×$(round(_sure_cost,digits=2)) per-voxel RMSE.";fontsize=12,font=:bold)
         safe_save(joinpath(ASSET,"fig10_lambda_compare.png"),f); f
     end
 end
@@ -1037,11 +970,11 @@ begin
             "tv" => Dict("lambda"=>TV_LAMBDA, "iters"=>TV_ITERS, "eps"=>TV_EPS, "simplex"=>String(TV_SIMPLEX),
                 "form"=>"coupled Huber-TV on (f_l,f_p); den = w + Σ_nbr λ/max(‖∇f‖,eps), w = 1/σ_f²",
                 "simplex_note"=>"project onto {f≥0, f_l+f_p≤1} ONCE on the result, never per sweep: per-sweep rectification is a Jensen bias on any region mean drawn from the map",
-                "lambda_rule"=>String(LAM_RULE),
-                "lambda_selected_by"=>"fitted on the $(length(CALPREP)) CALIBRATION thoraxes only (held-out circular/sector scans never enter any objective). Rules tried: GT-supervised per-voxel RMSE (golden-section, lambda=$(LAM_GT)); discrepancy chi2/N=1 full field ($(_dp.bracketed ? "lambda=$(LAM_DP)" : "root NOT bracketed - chi2/N stays >1: residual is structure, not noise")); discrepancy chi2/N=1 on cores ($(_dpc.bracketed ? "lambda=$(LAM_DPC)" : "root NOT bracketed - chi2/N approaches 1 from below")); MC-SURE correlated probe (lambda=$(LAM_SURE), x$(round(_sure_cost,digits=3))); MC-SURE white probe (lambda=$(LAM_SUREW), x$(round(_surew_cost,digits=3)), risk goes NEGATIVE at $(_neg_w)/$(length(LAMS)) lambdas). Gate: ship a GT-free rule only if cost <= $(LAM_GATE)x oracle RMSE",
-                "lambda_transfers"=> LAM_RULE===:gt_oracle ?
-                    "NO. Shipped lambda is supervised by phantom GT. GT-free rules (SURE white/correlated, discrepancy) were implemented and MEASURED on this phantom and all failed the $(LAM_GATE)x gate — SURE's divergence term is biased by the correlated noise (lag-1 ACF $(round(acf_x[2],digits=2))). Do not copy this number to another scanner/dose: refit on a phantom, or find a GT-free rule that passes the gate there." :
-                    "YES, via rule '$(LAM_RULE)' — a GT-free criterion that reproduced the GT-supervised lambda to within $(round(Int,100*(_ship_cost-1)))% of its per-voxel RMSE on this phantom. Refit it on the target scanner rather than copying the number."),
+                "lambda_rule"=>"gt_supervised",
+                "lambda_selected_by"=>"golden-section on log10(lambda) in [0.1,100], minimising per-voxel RMSE vs GT over the $(length(CALPREP)) CALIBRATION thoraxes only; held-out circular/sector scans never enter the objective",
+                "lambda_sure_reference"=>LAM_SURE,      # GT-free reference, NOT shipped
+                "lambda_sure_cost"=>_sure_cost,         # x oracle per-voxel RMSE if SURE's lambda were used
+                "lambda_transfers"=>"NO. Shipped lambda is supervised by phantom GT. A GT-free rule (MC-SURE, correlated probe — the noise here is not white, lag-1 ACF $(round(acf_x[2],digits=2))) was implemented and MEASURED on this phantom as a reference: it picks lambda=$(LAM_SURE) vs $(LAM_GT) and costs x$(round(_sure_cost,digits=3)) per-voxel RMSE, so it is reported, not shipped. Do not copy this number to another scanner/dose: refit on a phantom."),
             "provenance" => Dict("source"=>"wlp_decomposition.jl",
                 "chain"=>"80/140kVp EICT (:dd_fast) -> Cong water/iodine -> FBP $(RECON_N)px/$(Int(RECON_FOV_MM))mm -> VMI $(PTAG) keV; stadium QRM-thorax",
                 "cal_n"=>length(calrois), "r2_fw_fit"=>r2fit(cw,fwc), "test_n"=>length(drois),
@@ -1346,8 +1279,9 @@ Three traps are worth naming. Smoothness is not accuracy: within-core σ falls m
 turns back up, so an eye-tuned λ over-smooths and pays in bias. The simplex projection must fire **once**, not
 per sweep — rectifying every sweep is the same per-voxel Jensen bias this notebook refuses for the pooled decode
 (and on calibration `:once` also happens to beat both `:each` and `:never` on per-voxel RMSE). And λ here is
-supervised by phantom GT, so it **does not transfer to real CT**: with no GT, refit it GT-free at the measured
-noise level — the discrepancy principle against the σ ladder, GCV, or SURE — rather than copying this number.
+supervised by phantom GT, so it **does not transfer to real CT** — that is measured, not assumed: a GT-free
+MC-SURE (correlated probe, §6.5) picks λ=$(LAM_SURE) instead of $(LAM_GT) and costs ×$(round(_sure_cost,digits=2)) per-voxel RMSE, so it is
+carried as a reference and not shipped. Refit λ per scanner/dose on a phantom rather than copying this number.
 
 **Integrated-HU** (fig 6) is the answer to partial-volume underestimation of small fat: the object-extent
 measure loses $(round(Int,100-100*minimum(r.naivelip/r.truelip for r in integ)))% of a 4 mm fat object, while
