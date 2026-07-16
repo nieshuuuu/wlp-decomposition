@@ -366,442 +366,10 @@ begin
     md"`surf` (calibration) · `fit_sigma_quad` · `metrics` (CCC…) · `tv_coupled` (σ\_f Huber-TV) · `bayes_prior_broad`"
 end
 
-# ╔═╡ aaaa0030-0000-4000-8000-000000000030
-# The phantom label map as every downstream figure actually sees it: `map_m2` / `smap_m2`, i.e. the
-# 0.4 mm mask nearest-neighbour resampled to the 512² recon grid, mid-slice. Axes are phantom-frame
-# mm (not pixels) so the geometry is readable directly; yreversed ⇒ spine down = standard CT view.
-# Left: 13 hex-packed circular inserts (calibration + circular test). Right: 16 sector wedges, the
-# held-out test geometry. Insert numbers k index `mcomps[k]` / `scomps[k]` — label = ROD0-1+k.
-#
-# Insert colour is a deliberately neutral "mixture slot", NOT a tissue colour: the inserts are
-# `diverse_comps` spanning the whole W/L/P triangle (f_w 0.02–0.83 here — over half are water-
-# dominant), so they are not adipose and no tissue colour would be honest. Amber/blue/red are
-# reserved for the lipid/water/protein endpoints in fig_decode_triangle_noise. The label map is
-# also shared across scans while each scan redraws its own comps, so colour cannot encode
-# composition here — see the delivered map (fig3/fig7) for that.
-let f=CM.Figure(size=(1320,600))
-    x_mm(i)=185.0+(-RECON_FOV_MM/2+RECON_PX_MM/2+(i-1)*RECON_PX_MM)   # recon px → phantom mm (auto-centred on isocentre)
-    y_mm(j)=135.0+(-RECON_FOV_MM/2+RECON_PX_MM/2+(j-1)*RECON_PX_MM)
-    TIS=(0x00=>("air",CM.RGBf(1.00,1.00,1.00)), 0x01=>("lung",CM.RGBf(0.78,0.86,0.93)),
-         0x02=>("muscle",CM.RGBf(0.75,0.44,0.42)), 0x03=>("cortical bone",CM.RGBf(0.93,0.91,0.83)),
-         0x04=>("red marrow",CM.RGBf(0.85,0.55,0.58)), 0x05=>("adipose (fat ring)",CM.RGBf(0.97,0.83,0.46)))
-    INS=CM.RGBf(0.42,0.38,0.60); cmap=Dict(k=>c for (k,(_,c)) in TIS)
-    colorize(m)=[get(cmap,l,INS) for l in m]                          # anything ≥ ROD0 is a WLP insert
-    xr=(185.0-RECON_FOV_MM/2,185.0+RECON_FOV_MM/2); yr=(135.0-RECON_FOV_MM/2,135.0+RECON_FOV_MM/2)  # image! wants outer edges
-    θ=range(0,2π,200)
-    # Circular inserts are compact ⇒ centroid is fine. Sector wedges are annular, so their centroid
-    # drifts inward and the inner ring collides at the hub: place those on the wedge bisector at a
-    # fixed fraction of the ring, derived from the same constants that build them.
-    cpos(k)=(t=label_centroid(map_m2,UInt8(ROD0-1+k)); (x_mm(t[1]),y_mm(t[2])))
-    spos(k)=(a=((k-1)%SECT_NANG+0.5)*(2π/SECT_NANG); r=(SECT_R_MM/SECT_NRAD)*((k-1)÷SECT_NANG+0.55); (HC_X+r*cos(a),HC_Y+r*sin(a)))
-    for (col,(m,cmps,pos,ttl)) in enumerate(((map_m2,mcomps,cpos,"circular — $(length(mcomps)) hex-packed inserts, ø$(round(2*INS_R,digits=1)) mm"),
-                                             (smap_m2,scomps,spos,"sector — $(length(scomps)) wedges, r ≤ $(Int(SECT_R_MM)) mm (held-out)")))
-        ax=CM.Axis(f[1,col];aspect=CM.DataAspect(),yreversed=true,xlabel="x (mm)",ylabel=col==1 ? "y (mm)" : "",title=ttl,titlesize=11)
-        CM.image!(ax,xr,yr,colorize(m))
-        CM.lines!(ax,HC_X.+HEART_R_MM.*cos.(θ),HC_Y.+HEART_R_MM.*sin.(θ);color=:black,linestyle=:dash,linewidth=1.1)
-        CM.text!(ax,HC_X+HEART_R_MM+6,HC_Y;text="heart cavity\nr = $(Int(HEART_R_MM)) mm",fontsize=9,align=(:left,:center))
-        if col==2                       # wedges share one colour ⇒ draw the lattice or it reads as a solid disc
-            for a in 0:SECT_NANG-1
-                φ=a*(2π/SECT_NANG); CM.lines!(ax,[HC_X,HC_X+SECT_R_MM*cos(φ)],[HC_Y,HC_Y+SECT_R_MM*sin(φ)];color=(:white,0.8),linewidth=0.8)
-            end
-            for ri in 1:SECT_NRAD-1
-                rr=ri*(SECT_R_MM/SECT_NRAD); CM.lines!(ax,HC_X.+rr.*cos.(θ),HC_Y.+rr.*sin.(θ);color=(:white,0.8),linewidth=0.8)
-            end
-        end
-        for k in 1:length(cmps)
-            px,py=pos(k); isnan(px) && continue
-            CM.text!(ax,px,py;text=string(k),color=:white,fontsize=9,font=:bold,align=(:center,:center))
-        end
-    end
-    swatch(c)=CM.PolyElement(color=c,strokecolor=CM.RGBf(0.6,0.6,0.6),strokewidth=0.5)   # stroke: air is white-on-white
-    els=CM.PolyElement[]; lbls=String[]
-    for (k,(n,c)) in TIS; push!(els,swatch(c)); push!(lbls,"$(Int(k)) · $n"); end
-    push!(els,swatch(INS)); push!(lbls,"$(ROD0)+ · W/L/P mixture\n        slots (per-scan comps)")
-    CM.Legend(f[1,3],els,lbls,"label → material";framevisible=false,labelsize=10,titlesize=10)
-    CM.Label(f[0,:],"QRM-thorax phantom label map — 512² recon grid, mid-slice, phantom-frame mm · posterior down · numbers index mcomps/scomps";fontsize=12,font=:bold)
-    safe_save(joinpath(ASSET,"fig_phantom_labels.png"),f); f
-end
-
 # ╔═╡ aaaa0013-0000-4000-8000-000000000013
 md"""## 6 · Run sims + calibrate + decode (cached)
 4 calibration + 1 map thorax; **5 circular-test + 4 sector-test** held-out (n = 65 + 64 = 129 ROIs); 4 centred
 integrated-HU sims. First run ≈ 20 min on GPU; results cache to `data/wlp_*_cache_70_150.jls`. Delete those to re-sim."""
-
-# ╔═╡ aaaa0032-0000-4000-8000-000000000032
-# λ side-by-side: raw per-voxel decode vs the FITTED λ, on both geometries. Both panels run the real
-# `deliver` path; only λ differs. λ comes from the calibration fit, so this figure follows the data.
-# GT sits alongside because "which λ" is settled against truth, not by eye.
-begin
-    circ_raw = deliver(map_lo,map_hi,map_m2,mcomps; lambda=0.0)
-    sect_raw = deliver(smap_lo,smap_hi,smap_m2,scomps; lambda=0.0)
-    function pv_stats(rec,m2,comps,rpx)                      # per-voxel f_l vs GT on the eroded cores
-        t=Float64[];r=Float64[];sds=Float64[]
-        for k in 1:length(comps); ci=core_idx(m2,ROD0-1+k,rpx); isempty(ci)&&continue
-            v=[rec[I,2] for I in ci if isfinite(rec[I,2])]; isempty(v)&&continue
-            append!(t,fill(comps[k][2],length(v))); append!(r,v); push!(sds,std(v))
-        end
-        (rmse=sqrt(mean((r.-t).^2)), sd=mean(sds))
-    end
-    LROWS=((circ,circ_raw,map_m2,mcomps,CORE_RPX,"circular"),(sect,sect_raw,smap_m2,scomps,7,"sector"))
-    let f=CM.Figure(size=(1180,780))
-        for (row,(D,R,m2,comps,rpx,nm)) in enumerate(LROWS)
-            hi=findall(!isnan,D.tru[:,:,2]); ci=extrema(getindex.(hi,1)); cj=extrema(getindex.(hi,2)); pad=18
-            rI=max(1,ci[1]-pad):min(size(m2,1),ci[2]+pad); rJ=max(1,cj[1]-pad):min(size(m2,2),cj[2]+pad)
-            sD=pv_stats(D.rec,m2,comps,rpx); sR=pv_stats(R.rec,m2,comps,rpx)
-            _st(st)= st===nothing ? "" : @sprintf("\nper-voxel RMSE %.4f · within-core sd %.4f",st.rmse,st.sd)
-            for (col,(img,ttl,st)) in enumerate(((D.tru[rI,rJ,2],"$nm · true f_l",nothing),
-                                                 (R.rec[rI,rJ,2],"λ=0 — raw per-voxel decode",sR),
-                                                 (D.rec[rI,rJ,2],"λ=$(TV_LAMBDA) — fitted, ships",sD)))
-                ax=CM.Axis(f[row,col];title=ttl*_st(st),titlesize=11,aspect=CM.DataAspect(),yreversed=true)
-                CM.hidedecorations!(ax); hm=CM.heatmap!(ax,img;colormap=:jet,colorrange=(0,1))
-                (row==1&&col==3) && CM.Colorbar(f[:,4],hm;label="f_l")
-            end
-        end
-        CM.Label(f[0,:],"f_l delivered map — raw decode vs fitted λ=$(TV_LAMBDA) (σ_f Huber-TV, simplex=:$(TV_SIMPLEX)); λ fitted on CALIBRATION by golden-section, held-out scans untouched\nROI-level check on the held-out n=$(length(drois)): f_l CCC $(round(rs[i2_ship].m[2].ccc,digits=4)) at λ=$(TV_LAMBDA) vs $(round(rs[1].m[2].ccc,digits=4)) raw — the map gains without the region means paying";fontsize=12,font=:bold)
-        safe_save(joinpath(ASSET,"fig10_lambda_compare.png"),f); f
-    end
-end
-
-# ╔═╡ aaaa0026-0000-4000-8000-000000000026
-# Portable model snapshot — dumps the fitted surface + noise + gate + calibration table to
-# wlp_model_<pair>.toml (stdlib TOML, no BasisSimulator), so the model can be applied outside
-# this notebook. In-notebook, the `wlp_apply` cell below consumes the same coefficients live.
-# The cal table (ROI means/stds + true fractions) lets a new chain refit the same recipe.
-begin
-    import TOML
-    const MODEL_TOML = joinpath(@__DIR__, "wlp_model_$(PTAG).toml")
-    open(MODEL_TOML, "w") do io
-        TOML.print(io, Dict(
-            "pair" => Dict("E_low_keV"=>ELO, "E_high_keV"=>EHI),
-            "endpoints_hu" => Dict("water"=>collect(PW), "lipid"=>collect(PL), "protein"=>collect(PP)),
-            "poly2" => Dict("basis"=>"[1, hLow, hHigh, hLow^2, hHigh^2, hLow*hHigh] -> (fw,fl,fp), normalized by sum",
-                "cw"=>cw, "cl"=>cl, "cp"=>cp, "cl_affine"=>cl_aff),
-            "noise" => Dict("sigma_quad_low"=>sc_lo, "sigma_quad_high"=>sc_hi, "rho"=>ρ,
-                "Sigma_hu"=>[collect(Σhu[i,:]) for i in 1:2], "bias_hu"=>bias_hu),
-            "gate" => Dict("soft_hu_lo"=>SOFT_HU_LO, "soft_hu_hi"=>SOFT_HU_HI),
-            # TV belongs in the snapshot: wlp_apply denoises by default, so a consumer without these
-            # reproduces a different map. λ is weighed against w=1/σ_f², hence O(10), not O(0.01).
-            "tv" => Dict("lambda"=>TV_LAMBDA, "iters"=>TV_ITERS, "eps"=>TV_EPS, "simplex"=>String(TV_SIMPLEX),
-                "form"=>"coupled Huber-TV on (f_l,f_p); den = w + Σ_nbr λ/max(‖∇f‖,eps), w = 1/σ_f²",
-                "simplex_note"=>"project onto {f≥0, f_l+f_p≤1} ONCE on the result, never per sweep: per-sweep rectification is a Jensen bias on any region mean drawn from the map",
-                "lambda_selected_by"=>"golden-section on log10(lambda) in [0.1,100], minimising per-voxel RMSE vs GT over the $(length(CALPREP)) CALIBRATION thoraxes only; held-out circular/sector scans never enter the objective",
-                "lambda_transfers"=>"NO. This lambda is supervised by phantom GT. On real CT with no GT, refit it GT-free at the same noise level (discrepancy principle against the sigma ladder, GCV, or SURE) — do not copy this number across scanners/dose"),
-            "provenance" => Dict("source"=>"wlp_decomposition.jl",
-                "chain"=>"80/140kVp EICT (:dd_fast) -> Cong water/iodine -> FBP $(RECON_N)px/$(Int(RECON_FOV_MM))mm -> VMI $(PTAG) keV; stadium QRM-thorax",
-                "cal_n"=>length(calrois), "r2_fw_fit"=>r2fit(cw,fwc), "test_n"=>length(drois),
-                # scored through the delivered estimator (TV included) — same numbers as §8 and fig5
-                "test_ccc"=>[mw.ccc, ml.ccc, mp.ccc], "test_rmse"=>[mw.rmse, ml.rmse, mp.rmse],
-                "test_slope"=>[mw.slope, ml.slope, mp.slope]),
-            "calibration_table" => Dict("fw"=>fwc, "fl"=>flc, "fp"=>fpc,
-                "hu_low_mean"=>m_lo_cal, "hu_high_mean"=>m_hi_cal,
-                "hu_low_std"=>[r.s_lo for r in calrois], "hu_high_std"=>[r.s_hi for r in calrois],
-                "n_vox"=>[length(r.v_lo) for r in calrois]),
-        ))
-    end
-    Markdown.parse("**Model snapshot** → `$(basename(MODEL_TOML))` (poly2 surface + noise + gate + calibration table; applied live by the `wlp_apply` cell below).")
-end
-
-# ╔═╡ aaaa0027-0000-4000-8000-000000000027
-# One-click product: apply the fitted model to ANY co-registered VMI pair from the same 70/150-keV
-# chain → (f_w, f_l, f_p) maps. No external file, no re-fit — the model IS the live fitted globals
-# (cw,cl,cp,cl_aff, sc_lo,sc_hi, ρ, the soft-tissue gate); this reuses the delivered-map pipeline
-# (fullfield · sigma_f_weight · tv_coupled) verbatim, so the product and the validation share one method.
-begin
-    # tv=true → boundary-agnostic delivered map (2D slice); tv=false → raw per-voxel decode (any dim).
-    function wlp_apply(vmi_low, vmi_high; tv=true)
-        fw, fl, fp = fullfield(vmi_low, vmi_high)
-        tv || return (fw, fl, fp)
-        gate = .!isnan.(fl); w = sigma_f_weight(vmi_low, vmi_high)
-        fl_tv, fp_tv = tv_coupled(fl, fp, gate; lambda=TV_LAMBDA, w=w)
-        fw_tv = map((a, b) -> isnan(a) ? NaN : 1 - a - b, fl_tv, fp_tv)
-        (fw_tv, fl_tv, fp_tv)
-    end
-    let  # invariant: on the cached delivered-map slice, wlp_apply must reproduce the notebook's delivered map
-        fw, fl, fp = wlp_apply(map_lo, map_hi)
-        @assert isequal(cat(fw, fl, fp; dims=3), recmap) "wlp_apply must reproduce the delivered map"
-        ng = count(!isnan, fl); lo, hi = extrema(filter(!isnan, fl))
-        Markdown.parse("**One-click apply** — `fw, fl, fp = wlp_apply(vmi_low, vmi_high)` on a co-registered $(Int(ELO))/$(Int(EHI)) keV VMI pair. Reproduces the delivered map bit-for-bit on the cached slice: $ng gated voxels, f_l ∈ [$(round(lo,digits=2)), $(round(hi,digits=2))].")
-    end
-end
-
-# ╔═╡ aaaa0028-0000-4000-8000-000000000028
-# Raw export: dump every CT scan as an ImageJ-openable .raw (full 512×512×3 z-stack), grouped by role
-# into data/recon/{calibration,test}/, with per-label truth in label_comps.csv. Reuses the LIVE sim
-# arrays (no .jls re-read). Column-major Float32/UInt8, little-endian, NOT dim2-reversed (figures use
-# yreversed=true ⇒ ImageJ row 0 = top). Circular sims share the calibration label stack.
-let
-    RECON = joinpath(@__DIR__, "data", "recon")
-    dims3(M) = "$(size(M,1))x$(size(M,2))x$(size(M,3))"
-    wf32(dir, base, kev, M) = write(joinpath(dir, "$(base)_vmi$(kev)keV_$(dims3(M))_float32.raw"), Array{Float32}(M))
-    wu8(dir, base, M)       = write(joinpath(dir, "$(base)_$(dims3(M))_uint8.raw"), Array{UInt8}(M))
-    scan(dir, base, h_lo, h_hi) = (wf32(dir, base, Int(ELO), h_lo); wf32(dir, base, Int(EHI), h_hi))
-    comps_csv(dir, rows) = open(joinpath(dir, "label_comps.csv"), "w") do io
-        println(io, "scan,label,f_water,f_lipid,f_protein")
-        for (name, comps) in rows, (k, c) in enumerate(comps)
-            @printf(io, "%s,%d,%.4f,%.4f,%.4f\n", name, ROD0 - 1 + k, c[1], c[2], c[3])
-        end
-    end
-    rm(RECON; recursive=true, force=true)
-    CAL = joinpath(RECON, "calibration"); TST = joinpath(RECON, "test"); mkpath(CAL); mkpath(TST)
-    NZ = size(map_hi_v, 3)
-    crows = Tuple{String,Any}[]
-    for (i, s) in enumerate(calsims); scan(CAL, "noise_sim$i", s.hu_lo, s.hu_hi); push!(crows, ("noise_sim$i", s.comps)); end
-    scan(CAL, "deliveredmap", map_lo_v, map_hi_v); push!(crows, ("deliveredmap", mcomps))
-    wu8(CAL, "labels", repeat(map_m2, 1, 1, NZ)); comps_csv(CAL, crows)
-    trows = Tuple{String,Any}[]
-    for (i, s) in enumerate(testsims); scan(TST, "circular_sim$i", s.hu_lo, s.hu_hi); push!(trows, ("circular_sim$i", s.comps)); end
-    for (i, s) in enumerate(sectsims); scan(TST, "sector_sim$i", s.hu_lo, s.hu_hi); push!(trows, ("sector_sim$i", s.comps)); end
-    scan(TST, "sector_deliveredmap", smap_lo_v, smap_hi_v); push!(trows, ("sector_deliveredmap", scomps))
-    wu8(TST, "labels_circular", repeat(map_m2, 1, 1, NZ)); wu8(TST, "labels_sector", repeat(smap_m2, 1, 1, NZ)); comps_csv(TST, trows)
-    p = joinpath(CAL, "noise_sim1_vmi$(Int(ELO))keV_512x512x$(NZ)_float32.raw")   # byte-layout round-trip
-    @assert reshape(reinterpret(Float32, read(p)), 512, 512, NZ) == Array{Float32}(calsims[1].hu_lo) "raw round-trip mismatch — byte layout wrong"
-    write(joinpath(RECON, "README_imagej.txt"), """
-ImageJ → File → Import → Raw…
-  Image type       = 32-bit Real  (*_float32.raw)   |   8-bit  (*_labels*_uint8.raw)
-  Width = nx, Height = ny, Number of images = nz (= $(NZ))   ·   ☑ Little-endian byte order
-Column-major, NOT dim2-reversed (notebook figures use yreversed=true ⇒ ImageJ row 0 = top).
-calibration/: noise_sim1..$(length(calsims)) + deliveredmap ; labels = shared insert stack (8..20).
-test/:  circular_sim1..$(length(testsims)) · sector_sim1..$(length(sectsims)) + sector_deliveredmap
-        labels_circular (8..20) · labels_sector (8..23).
-VMI keV pair: $(Int(ELO)) / $(Int(EHI)).  label_comps.csv (per folder) → each scan's per-label
-(f_water, f_lipid, f_protein) ground truth.
-""")
-    Markdown.parse("**Raws exported** → `data/recon/` — calibration: $(2*(length(calsims)+1)) scans, test: $(2*(length(testsims)+length(sectsims)+1)) scans (ImageJ 32-bit, little-endian, $(NZ)-slice stacks). Layout in `README_imagej.txt`.")
-end
-
-# ╔═╡ aaaa0015-0000-4000-8000-000000000015
-md"## 7 · Figures"
-
-# ╔═╡ aaaa0016-0000-4000-8000-000000000016
-# Barycentric triangle + noise-ellipse MLE, in ONE figure: Panel A = the full W/L/P sliver
-# (every test voxel, coloured by whether its raw decode is feasible); Panel B = a zoom on the
-# water–lipid corner showing the Σ noise ellipse and the out-of-triangle ROI means projected
-# back onto the triangle in the Mahalanobis (Σ⁻¹) metric. Rebuilds from the decode-cell globals.
-let
-    # ── per-voxel HU + feasibility across all scored ROIs (circular + sector) ──
-    HUx=Float64[]; HUy=Float64[]; feas=Bool[]
-    for r in allrois, j in eachindex(r.v_lo)
-        d=decode(r.v_lo[j],r.v_hi[j]); push!(HUx,r.v_lo[j]); push!(HUy,r.v_hi[j]); push!(feas, all(d.≥-1e-9))
-    end
-    stride=max(1,length(HUx)÷5000); ss=1:stride:length(HUx)                       # deterministic thin for plotting
-    fin=[i for i in ss if feas[i]]; fout=[i for i in ss if !feas[i]]
-    pv_out=100*count(!,feas)/length(feas)
-    rmx=[r.m_lo for r in allrois]; rmy=[r.m_hi for r in allrois]
-    rout=findall(any(decode(r.m_lo,r.m_hi).<-1e-6) for r in allrois)                 # ROI means outside the simplex
-    condG=cond(Gmat); s70v=sqrt(Σhu[1,1]); s150v=sqrt(Σhu[2,2])
-    CIN=CM.RGBf(0.353,0.655,0.353); COUT=CM.RGBf(0.557,0.373,0.659)                # feasible / infeasible
-    CWv=CM.RGBf(0.231,0.459,0.690); CLv=CM.RGBf(0.910,0.639,0.239); CPv=CM.RGBf(0.757,0.267,0.235)
-    zx0,zx1,zy0,zy1=-125.0,20.0,-95.0,15.0                                          # zoom window (water–lipid corner)
-
-    f=CM.Figure(size=(1180,520))
-    # ── Panel A: the whole triangle (equal aspect ⇒ the sliver is honest) ──
-    axA=CM.Axis(f[1,1];xlabel="HU @ $(Int(ELO)) keV",ylabel="HU @ $(Int(EHI)) keV",
-                title="The W/L/P triangle is a sliver (cond G = $(round(condG,digits=1)))",aspect=CM.DataAspect())
-    CM.poly!(axA,[CM.Point2f(PW...),CM.Point2f(PL...),CM.Point2f(PP...)];color=(:gray,0.10),strokecolor=(:black,0.45),strokewidth=1.2)
-    CM.scatter!(axA,HUx[fin],HUy[fin];color=(CIN,0.30),markersize=3,label="decode inside")
-    CM.scatter!(axA,HUx[fout],HUy[fout];color=(COUT,0.35),markersize=3,label="decode outside ($(round(pv_out,digits=1))%)")
-    for (p,c,t) in ((PW,CWv,"water"),(PL,CLv,"lipid"),(PP,CPv,"protein"))
-        CM.scatter!(axA,[p[1]],[p[2]];color=c,markersize=13,strokecolor=:white,strokewidth=1.2)
-        CM.text!(axA,p[1],p[2];text=t,fontsize=11,color=c,font=:bold,align=(:left,:bottom))
-    end
-    CM.lines!(axA,[zx0,zx1,zx1,zx0,zx0],[zy0,zy0,zy1,zy1,zy0];color=(:black,0.6),linestyle=:dash,linewidth=1.0)
-    CM.text!(axA,zx1,zy1;text="B",fontsize=11,font=:bold,color=(:black,0.7),align=(:left,:bottom))
-    CM.axislegend(axA;position=:lt,framevisible=false,labelsize=9)
-    # ── Panel B: zoom on the water–lipid corner + noise ellipse + MLE projections ──
-    axB=CM.Axis(f[1,2];xlabel="HU @ $(Int(ELO)) keV",ylabel="HU @ $(Int(EHI)) keV",
-                title="Out-of-triangle ROI means → Σ⁻¹ (Mahalanobis) MLE projection",limits=(zx0,zx1,zy0,10.0))
-    CM.poly!(axB,[CM.Point2f(PW...),CM.Point2f(PL...),CM.Point2f(PP...)];color=(:gray,0.10),strokecolor=(:black,0.45),strokewidth=1.2)
-    inz=[i for i in 1:length(HUx) if zx0≤HUx[i]≤zx1 && zy0≤HUy[i]≤zy1]
-    inz=inz[1:max(1,length(inz)÷4000):end]
-    CM.scatter!(axB,HUx[[i for i in inz if feas[i]]],HUy[[i for i in inz if feas[i]]];color=(CIN,0.22),markersize=3)
-    CM.scatter!(axB,HUx[[i for i in inz if !feas[i]]],HUy[[i for i in inz if !feas[i]]];color=(COUT,0.26),markersize=3)
-    ev=eigen(Σhu); anchor=[-84.0,-55.0]                                            # ellipse in empty space below the cloud
-    for k in (1.0,2.0)
-        pts=[anchor.+k.*(sqrt(ev.values[1])*cos(τ).*ev.vectors[:,1].+sqrt(ev.values[2])*sin(τ).*ev.vectors[:,2]) for τ in range(0,2π,length=140)]
-        CM.lines!(axB,first.(pts),last.(pts);color=:black,linewidth=(k==1.0 ? 1.6 : 1.0),linestyle=(k==1.0 ? :solid : :dash))
-    end
-    CM.scatter!(axB,[anchor[1]],[anchor[2]];color=:black,markersize=5)
-    CM.text!(axB,anchor[1],anchor[2]-7;text="noise Σ  (σ₇₀=$(round(s70v,digits=1)), σ₁₅₀=$(round(s150v,digits=1)), ρ=$(round(ρ,digits=2)))\n1σ / 2σ contours",fontsize=8,align=(:center,:top))
-    for i in rout                                                                  # measured mean → feasible edge point
-        θ=Gmat\([rmx[i],rmy[i]].-bias_hu); (fl,fp)=proj_simplex((θ[1],θ[2])); hp=Gmat*[fl,fp]
-        CM.lines!(axB,[rmx[i],hp[1]],[rmy[i],hp[2]];color=COUT,linewidth=1.3)
-        CM.scatter!(axB,[hp[1]],[hp[2]];marker=:utriangle,color=COUT,markersize=8)
-    end
-    CM.scatter!(axB,rmx[rout],rmy[rout];color=COUT,markersize=10,strokecolor=:white,strokewidth=0.9)
-    CM.scatter!(axB,[rmx[i] for i in 1:length(rmx) if !(i in rout)],[rmy[i] for i in 1:length(rmy) if !(i in rout)];color=(CIN,0.6),markersize=7)
-    for (p,c,t) in ((PW,CWv,"water"),(PL,CLv,"lipid")); CM.scatter!(axB,[p[1]],[p[2]];color=c,markersize=13,strokecolor=:white,strokewidth=1.2); CM.text!(axB,p[1],p[2];text=t,fontsize=11,color=c,font=:bold,align=(:left,:bottom)); end
-    CM.Label(f[0,:],"Decomposition triangle + noise model: $(round(pv_out,digits=1))% of voxels decode outside the simplex under noise (96% within 2σ); only $(length(rout))/$(length(allrois)) ROI means need the pooled MLE projection";fontsize=12,font=:bold)
-    safe_save(joinpath(ASSET,"fig_decode_triangle_noise.png"),f); f
-end
-
-# ╔═╡ aaaa0017-0000-4000-8000-000000000017
-let f=CM.Figure(size=(1050,460))
-    ax=CM.Axis(f[1,1];xlabel="HU",ylabel="σ (HU)",title="σ(HU) per energy — convex-quadratic")
-    for (hu,sg,cc,e,col) in ((m_lo_cal,[r.s_lo for r in calrois],sc_lo,ELO,:tomato),(m_hi_cal,[r.s_hi for r in calrois],sc_hi,EHI,:royalblue))
-        CM.scatter!(ax,hu,sg;color=col,markersize=8,label="$(Int(e)) keV"); g=range(minimum(hu),maximum(hu),100); CM.lines!(ax,g,quad_sigma.(Ref(cc),g);color=col)
-    end
-    CM.axislegend(ax;position=:rt)
-    ax2=CM.Axis(f[1,2];xlabel="resid HU$(Int(ELO))",ylabel="resid HU$(Int(EHI))",title="inter-energy ρ=$(round(ρ,digits=2))")
-    idx=rand(1:length(res_lo),min(3000,length(res_lo))); CM.scatter!(ax2,res_lo[idx],res_hi[idx];markersize=3,color=(:purple,0.3))
-    safe_save(joinpath(ASSET,"fig2_noise.png"),f); f
-end
-
-# ╔═╡ aaaa0018-0000-4000-8000-000000000018
-let f=CM.Figure(size=(1520,430))
-    ax=CM.Axis(f[1,1];title="VMI $(Int(EHI)) keV",aspect=CM.DataAspect(),yreversed=true); CM.hidedecorations!(ax); CM.heatmap!(ax,map_hi;colormap=:grays,colorrange=(-200,300))
-    for (col,(img,ttl)) in enumerate(((recmap[:,:,1],"f_w"),(recmap[:,:,2],"f_l"),(recmap[:,:,3],"f_p")))
-        ax2=CM.Axis(f[1,col+1];title=ttl,aspect=CM.DataAspect(),yreversed=true); CM.hidedecorations!(ax2); CM.heatmap!(ax2,img;colormap=:jet,colorrange=(0,1))
-    end
-    CM.Colorbar(f[1,5];colormap=:jet,colorrange=(0,1),label="volume fraction")
-    CM.Label(f[0,:],"Delivered map — per-voxel decode + σ_f-weighted Huber-TV (λ=$(TV_LAMBDA), simplex=:$(TV_SIMPLEX)), boundary-agnostic (lung & bone HU-gated out)";fontsize=13,font=:bold)
-    safe_save(joinpath(ASSET,"fig3_delivered_map.png"),f); f
-end
-
-# ╔═╡ aaaa0019-0000-4000-8000-000000000019
-let f=CM.Figure(size=(1250,440))
-    hi=findall(!isnan,truemap[:,:,2]); ci=extrema(getindex.(hi,1)); cj=extrema(getindex.(hi,2)); pad=28
-    rI=max(1,ci[1]-pad):min(size(map_m2,1),ci[2]+pad); rJ=max(1,cj[1]-pad):min(size(map_m2,2),cj[2]+pad)
-    for (col,(img,ttl)) in enumerate(((truemap[rI,rJ,2],"true f_l (GT regions)"),(recmap[rI,rJ,2],"honest (per-voxel + TV)"),(recmap_gt[rI,rJ,2],"optimistic (GT-boundary pooled)")))
-        ax=CM.Axis(f[1,col];title=ttl,aspect=CM.DataAspect(),yreversed=true); CM.hidedecorations!(ax); hm=CM.heatmap!(ax,img;colormap=:jet,colorrange=(0,1)); col==3&&CM.Colorbar(f[1,4],hm;label="f_l")
-    end
-    CM.Label(f[0,:],"f_l over the heart: honest per-voxel+TV keeps real texture & PVE edges; GT-pooled is flat (uses the boundary we don't have on real fat)";fontsize=12,font=:bold)
-    safe_save(joinpath(ASSET,"fig4_honest_vs_pooled.png"),f); f
-end
-
-# ╔═╡ aaaa0023-0000-4000-8000-000000000023
-# GT vs recovered (jet 0–1) vs signed error (blue–white–red diverging, own colorbar) for ALL THREE materials.
-# Circular phantom.
-let f=CM.Figure(size=(1320,1050)), Dl=circ
-    hi=findall(!isnan,Dl.tru[:,:,2]); ci=extrema(getindex.(hi,1)); cj=extrema(getindex.(hi,2)); pad=25
-    rI=max(1,ci[1]-pad):min(size(Dl.tru,1),ci[2]+pad); rJ=max(1,cj[1]-pad):min(size(Dl.tru,2),cj[2]+pad)
-    for (row,mat) in enumerate(("f_w","f_l","f_p"))
-        tl=Dl.tru[rI,rJ,row]; rf=Dl.rec[rI,rJ,row]
-        rl=[isnan(tl[i,j]) ? NaN : rf[i,j] for i in axes(tl,1),j in axes(tl,2)]
-        er=[isnan(tl[i,j]) ? NaN : rf[i,j]-tl[i,j] for i in axes(tl,1),j in axes(tl,2)]
-        for (col,(img,ttl,cm,cr)) in enumerate(((tl,"true",:jet,(0,1)),(rl,"recovered",:jet,(0,1)),(er,"error",CM.Reverse(:RdBu),(-0.3,0.3))))
-            ax=CM.Axis(f[row,col];title=(row==1 ? ttl : ""),ylabel=(col==1 ? mat : ""),aspect=CM.DataAspect(),yreversed=true)
-            CM.hidedecorations!(ax;label=false); CM.heatmap!(ax,img;colormap=cm,colorrange=cr)
-        end
-    end
-    CM.Colorbar(f[:,4];colormap=:jet,colorrange=(0,1),label="fraction (true / recovered)")
-    CM.Colorbar(f[:,5];colormap=CM.Reverse(:RdBu),colorrange=(-0.3,0.3),label="error (recovered − true)")
-    CM.Label(f[0,:],"Circular phantom — true & recovered (jet 0–1) vs error (blue–white–red), f_w / f_l / f_p";fontsize=13,font=:bold)
-    safe_save(joinpath(ASSET,"fig8_gt_rec_error_circular.png"),f); f
-end
-
-# ╔═╡ aaaa0022-0000-4000-8000-000000000022
-let f=CM.Figure(size=(1520,430))
-    ax=CM.Axis(f[1,1];title="VMI $(Int(EHI)) keV (sector)",aspect=CM.DataAspect(),yreversed=true); CM.hidedecorations!(ax); CM.heatmap!(ax,smap_hi;colormap=:grays,colorrange=(-200,300))
-    for (col,(img,ttl)) in enumerate(((sect.rec[:,:,1],"f_w"),(sect.rec[:,:,2],"f_l"),(sect.rec[:,:,3],"f_p")))
-        ax2=CM.Axis(f[1,col+1];title=ttl,aspect=CM.DataAspect(),yreversed=true); CM.hidedecorations!(ax2); CM.heatmap!(ax2,img;colormap=:jet,colorrange=(0,1))
-    end
-    CM.Colorbar(f[1,5];colormap=:jet,colorrange=(0,1),label="volume fraction")
-    CM.Label(f[0,:],"Delivered map — sector validation phantom (per-voxel decode + σ_f Huber-TV λ=$(TV_LAMBDA), simplex=:$(TV_SIMPLEX), boundary-agnostic)";fontsize=13,font=:bold)
-    safe_save(joinpath(ASSET,"fig7_delivered_map_sector.png"),f); f
-end
-
-# ╔═╡ aaaa0024-0000-4000-8000-000000000024
-# Same triad for the SECTOR validation phantom (held-out shape).
-let f=CM.Figure(size=(1320,1050)), Dl=sect
-    hi=findall(!isnan,Dl.tru[:,:,2]); ci=extrema(getindex.(hi,1)); cj=extrema(getindex.(hi,2)); pad=25
-    rI=max(1,ci[1]-pad):min(size(Dl.tru,1),ci[2]+pad); rJ=max(1,cj[1]-pad):min(size(Dl.tru,2),cj[2]+pad)
-    for (row,mat) in enumerate(("f_w","f_l","f_p"))
-        tl=Dl.tru[rI,rJ,row]; rf=Dl.rec[rI,rJ,row]
-        rl=[isnan(tl[i,j]) ? NaN : rf[i,j] for i in axes(tl,1),j in axes(tl,2)]
-        er=[isnan(tl[i,j]) ? NaN : rf[i,j]-tl[i,j] for i in axes(tl,1),j in axes(tl,2)]
-        for (col,(img,ttl,cm,cr)) in enumerate(((tl,"true",:jet,(0,1)),(rl,"recovered",:jet,(0,1)),(er,"error",CM.Reverse(:RdBu),(-0.3,0.3))))
-            ax=CM.Axis(f[row,col];title=(row==1 ? ttl : ""),ylabel=(col==1 ? mat : ""),aspect=CM.DataAspect(),yreversed=true)
-            CM.hidedecorations!(ax;label=false); CM.heatmap!(ax,img;colormap=cm,colorrange=cr)
-        end
-    end
-    CM.Colorbar(f[:,4];colormap=:jet,colorrange=(0,1),label="fraction (true / recovered)")
-    CM.Colorbar(f[:,5];colormap=CM.Reverse(:RdBu),colorrange=(-0.3,0.3),label="error (recovered − true)")
-    CM.Label(f[0,:],"Sector phantom — true & recovered (jet 0–1) vs error (blue–white–red), f_w / f_l / f_p";fontsize=13,font=:bold)
-    safe_save(joinpath(ASSET,"fig9_gt_rec_error_sector.png"),f); f
-end
-
-# ╔═╡ aaaa0020-0000-4000-8000-000000000020
-let f=CM.Figure(size=(1300,460))
-    for (col,(t,p,mt,sem,nm)) in enumerate(((tfw,pfw,mw,semfw,"f_w"),(tfl,pfl,ml,semfl,"f_l"),(tfp,pfp,mp,semfp,"f_p")))
-        lo=min(minimum(t),minimum(p));hi=max(maximum(t),maximum(p))
-        ax=CM.Axis(f[1,col];xlabel="true $nm",ylabel="recovered",title=nm,aspect=CM.DataAspect(),limits=(lo,hi,lo,hi))
-        CM.lines!(ax,[lo,hi],[lo,hi];color=:gray,linestyle=:dash)
-        CM.errorbars!(ax,t,p,sem;color=(:black,0.55),whiskerwidth=8,linewidth=1.2)   # capped error bars, all 3 materials
-        CM.scatter!(ax,t,p;color=[g==:circular ? :steelblue : :orange for g in geomtag],markersize=8)
-        CM.text!(ax,lo+0.03*(hi-lo),hi-0.05*(hi-lo);text=@sprintf("CCC %.3f\nslope %.2f\nRMSE %.3f\nR² %.3f",mt.ccc,mt.slope,mt.rmse,mt.r2),align=(:left,:top),fontsize=11)
-    end
-    CM.Label(f[0,:],"Recovered vs true (n=$(length(drois)): $(count(==(:circular),geomtag)) circular + $(count(==(:sector),geomtag)) sector · DELIVERED estimator: per-voxel decode + σ_f Huber-TV λ=$(TV_LAMBDA), simplex=:$(TV_SIMPLEX) · eroded-core pool) — blue=circular, orange=sector; error bars = SE of the ROI mean";fontsize=12,font=:bold)
-    safe_save(joinpath(ASSET,"fig5_scatter.png"),f); f
-end
-
-# ╔═╡ aaaa0021-0000-4000-8000-000000000021
-let f=CM.Figure(size=(1250,470)), rr=[r.r for r in integ]
-    ax=CM.Axis(f[1,1];xlabel="fat object radius (mm)",ylabel="recovered / true excess lipid",title="Object-extent measure vs integrated-HU")
-    CM.scatterlines!(ax,rr,[r.naivelip/r.truelip for r in integ];color=:tomato,markersize=13,label="naive (object extent)")
-    CM.scatterlines!(ax,rr,[r.intlip/r.truelip for r in integ];color=:seagreen,markersize=13,label="integrated (+$(Int(FIXED_MARGIN_PX)) px skirt)")
-    CM.hlines!(ax,[1.0];color=:gray,linestyle=:dash); CM.axislegend(ax;position=:rb)
-    ax2=CM.Axis(f[1,2];xlabel="integration margin (recon-px)",ylabel="recovered / true",title="Conservation vs margin")
-    for r in integ; CM.lines!(ax2,r.margins,r.recov./r.truelip;linewidth=2,label=@sprintf("r=%.0f mm",r.r)); end
-    CM.hlines!(ax2,[1.0];color=:gray,linestyle=:dash); CM.vlines!(ax2,[FIXED_MARGIN_PX];color=(:black,0.3),linestyle=:dot); CM.axislegend(ax2;position=:rb)
-    CM.Label(f[0,:],"Partial volume makes the object-extent measure under-report small fat; integrated-HU recovers it via conservation (bg = local muscle)";fontsize=12,font=:bold)
-    safe_save(joinpath(ASSET,"fig6_integrated_hu.png"),f); f
-end
-
-# ╔═╡ aaaa0025-0000-4000-8000-000000000025
-Markdown.parse("""
-## 8 · Conclusion
-
-| fraction | CCC | slope | RMSE |
-|---|---|---|---|
-| **f_water** | **$(round(mw.ccc,digits=3))** | $(round(mw.slope,digits=2)) | $(round(mw.rmse,digits=3)) |
-| f_lipid | $(round(ml.ccc,digits=3)) | $(round(ml.slope,digits=2)) | $(round(ml.rmse,digits=3)) |
-| f_protein | $(round(mp.ccc,digits=3)) | $(round(mp.slope,digits=2)) | $(round(mp.rmse,digits=3)) |
-
-Held-out **circular + sector** (n=$(length(drois))), scored through the **delivered** estimator — per-voxel
-decode + σ\\_f-weighted Huber-TV (λ=$(TV_LAMBDA), simplex=`:$(TV_SIMPLEX)`), the same chain `wlp_apply` ships, so this table and the
-delivered map (fig 3/7) cannot disagree. Detectability: **$(round(Int,100mean(dHU_hi.<5)))% of ROIs < 5 HU at $(Int(EHI)) keV** (mean $(round(mean(dHU_hi),digits=1)) HU).
-
-**keV pair — $(Int(ELO))/$(Int(EHI)).** This pair is intentionally ill-conditioned (150 keV is a clinically
-standard VMI, but the two energies sit above the photoelectric-rich low-keV regime): the W/L/P triangle is a
-near-collinear sliver, **cond(G) = $(round(cond([PL[1]-PW[1] PP[1]-PW[1]; PL[2]-PW[2] PP[2]-PW[2]]),digits=1))**
-(≈3.5× a low-keV pair). Yet the held-out **ROI CCC is unaffected** — the √N eroded-core pooling absorbs the
-per-voxel conditioning penalty, and the inter-energy noise correlation ρ=$(round(ρ,digits=2)) is low enough to
-help the separation. The penalty surfaces only in the per-voxel maps and the integrated-HU total; conditioning
-number alone overpredicts it. The pair is a single `WLP_PAIR` knob.
-
-**Point accuracy** is excellent on the eroded interior cores (all CCC ≥ $(round(minimum((mw.ccc,ml.ccc,mp.ccc)),digits=3))) and, as expected on a uniform
-phantom, per-voxel vs pool-then-decode barely differ there (f\\_l CCC $(round(ml.ccc,digits=3)) vs $(round(ml_pool.ccc,digits=3))). The honesty cost of the ground-truth
-boundary shows up in the **delivered map** (fig 3–4): the boundary-agnostic per-voxel+TV map keeps real texture
-and PVE edges, whereas the GT-pooled map is flat because it uses a boundary real fat doesn't provide.
-
-**The denoiser is fitted, not admired.** λ=$(TV_LAMBDA) is not a setting: it is the golden-section minimiser of
-per-voxel RMSE vs GT over the **calibration** thoraxes ($(_gold.n) evaluations on log₁₀λ ∈ [0.1,100]; §6.5). The
-held-out circular and sector scans are absent from that objective, so the table above is a test score, not a
-training score — and λ carries no literal, so a new scanner, dose or keV pair refits it.
-
-**What it costs, plainly.** The objective is the *map*, and the map is not free at the region level: vs the raw
-decode, the fitted λ leaves f\\_l CCC at $(round(ml.ccc,digits=4)) but multiplies ROI f\\_l RMSE by
-**$(round(_rratio,digits=2))×**. That is the honest price of a per-voxel objective, and it is quoted rather than
-buried in CCC's third decimal — CCC is dominated by the between-ROI spread and is nearly blind to this. Anyone
-who needs region means more than maps should state an ROI-aware objective **and fit it on calibration**; what is
-not allowed is tuning λ against the held-out table.
-
-Three traps are worth naming. Smoothness is not accuracy: within-core σ falls monotonically with λ while RMSE
-turns back up, so an eye-tuned λ over-smooths and pays in bias. The simplex projection must fire **once**, not
-per sweep — rectifying every sweep is the same per-voxel Jensen bias this notebook refuses for the pooled decode
-(and on calibration `:once` also happens to beat both `:each` and `:never` on per-voxel RMSE). And λ here is
-supervised by phantom GT, so it **does not transfer to real CT**: with no GT, refit it GT-free at the measured
-noise level — the discrepancy principle against the σ ladder, GCV, or SURE — rather than copying this number.
-
-**Integrated-HU** (fig 6) is the answer to partial-volume underestimation of small fat: the object-extent
-measure loses $(round(Int,100-100*minimum(r.naivelip/r.truelip for r in integ)))% of a 4 mm fat object, while
-integrating an affine decode over the object+skirt with a local muscle background recovers it to
-$(round(Int,100*minimum(r.intlip/r.truelip for r in integ)))–$(round(Int,100*maximum(r.intlip/r.truelip for r in integ)))% via mass conservation. The affine decode carries a separate
-$(round(Int,100*(FAT_AFF/IFL-1)))% composition bias at f_l=$(IFL) (linearization error), common to both estimators. Real-data caveats:
-integrated-HU fixes the *numerator* (total lipid) — a region *mean* still needs a segmentation denominator; the
-local background must be a field (not a constant) because PVAT muscle isn't uniform; and conservation is exact
-only for linear/FBP recon, so a clinical DLIR/QIR transfer must re-earn it empirically.
-""")
 
 # ╔═╡ aaaa0014-0000-4000-8000-000000000014
 begin
@@ -1193,6 +761,62 @@ begin
 """)
 end
 
+# ╔═╡ aaaa0030-0000-4000-8000-000000000030
+# The phantom label map as every downstream figure actually sees it: `map_m2` / `smap_m2`, i.e. the
+# 0.4 mm mask nearest-neighbour resampled to the 512² recon grid, mid-slice. Axes are phantom-frame
+# mm (not pixels) so the geometry is readable directly; yreversed ⇒ spine down = standard CT view.
+# Left: 13 hex-packed circular inserts (calibration + circular test). Right: 16 sector wedges, the
+# held-out test geometry. Insert numbers k index `mcomps[k]` / `scomps[k]` — label = ROD0-1+k.
+#
+# Insert colour is a deliberately neutral "mixture slot", NOT a tissue colour: the inserts are
+# `diverse_comps` spanning the whole W/L/P triangle (f_w 0.02–0.83 here — over half are water-
+# dominant), so they are not adipose and no tissue colour would be honest. Amber/blue/red are
+# reserved for the lipid/water/protein endpoints in fig_decode_triangle_noise. The label map is
+# also shared across scans while each scan redraws its own comps, so colour cannot encode
+# composition here — see the delivered map (fig3/fig7) for that.
+let f=CM.Figure(size=(1320,600))
+    x_mm(i)=185.0+(-RECON_FOV_MM/2+RECON_PX_MM/2+(i-1)*RECON_PX_MM)   # recon px → phantom mm (auto-centred on isocentre)
+    y_mm(j)=135.0+(-RECON_FOV_MM/2+RECON_PX_MM/2+(j-1)*RECON_PX_MM)
+    TIS=(0x00=>("air",CM.RGBf(1.00,1.00,1.00)), 0x01=>("lung",CM.RGBf(0.78,0.86,0.93)),
+         0x02=>("muscle",CM.RGBf(0.75,0.44,0.42)), 0x03=>("cortical bone",CM.RGBf(0.93,0.91,0.83)),
+         0x04=>("red marrow",CM.RGBf(0.85,0.55,0.58)), 0x05=>("adipose (fat ring)",CM.RGBf(0.97,0.83,0.46)))
+    INS=CM.RGBf(0.42,0.38,0.60); cmap=Dict(k=>c for (k,(_,c)) in TIS)
+    colorize(m)=[get(cmap,l,INS) for l in m]                          # anything ≥ ROD0 is a WLP insert
+    xr=(185.0-RECON_FOV_MM/2,185.0+RECON_FOV_MM/2); yr=(135.0-RECON_FOV_MM/2,135.0+RECON_FOV_MM/2)  # image! wants outer edges
+    θ=range(0,2π,200)
+    # Circular inserts are compact ⇒ centroid is fine. Sector wedges are annular, so their centroid
+    # drifts inward and the inner ring collides at the hub: place those on the wedge bisector at a
+    # fixed fraction of the ring, derived from the same constants that build them.
+    cpos(k)=(t=label_centroid(map_m2,UInt8(ROD0-1+k)); (x_mm(t[1]),y_mm(t[2])))
+    spos(k)=(a=((k-1)%SECT_NANG+0.5)*(2π/SECT_NANG); r=(SECT_R_MM/SECT_NRAD)*((k-1)÷SECT_NANG+0.55); (HC_X+r*cos(a),HC_Y+r*sin(a)))
+    for (col,(m,cmps,pos,ttl)) in enumerate(((map_m2,mcomps,cpos,"circular — $(length(mcomps)) hex-packed inserts, ø$(round(2*INS_R,digits=1)) mm"),
+                                             (smap_m2,scomps,spos,"sector — $(length(scomps)) wedges, r ≤ $(Int(SECT_R_MM)) mm (held-out)")))
+        ax=CM.Axis(f[1,col];aspect=CM.DataAspect(),yreversed=true,xlabel="x (mm)",ylabel=col==1 ? "y (mm)" : "",title=ttl,titlesize=11)
+        CM.image!(ax,xr,yr,colorize(m))
+        CM.lines!(ax,HC_X.+HEART_R_MM.*cos.(θ),HC_Y.+HEART_R_MM.*sin.(θ);color=:black,linestyle=:dash,linewidth=1.1)
+        CM.text!(ax,HC_X+HEART_R_MM+6,HC_Y;text="heart cavity\nr = $(Int(HEART_R_MM)) mm",fontsize=9,align=(:left,:center))
+        if col==2                       # wedges share one colour ⇒ draw the lattice or it reads as a solid disc
+            for a in 0:SECT_NANG-1
+                φ=a*(2π/SECT_NANG); CM.lines!(ax,[HC_X,HC_X+SECT_R_MM*cos(φ)],[HC_Y,HC_Y+SECT_R_MM*sin(φ)];color=(:white,0.8),linewidth=0.8)
+            end
+            for ri in 1:SECT_NRAD-1
+                rr=ri*(SECT_R_MM/SECT_NRAD); CM.lines!(ax,HC_X.+rr.*cos.(θ),HC_Y.+rr.*sin.(θ);color=(:white,0.8),linewidth=0.8)
+            end
+        end
+        for k in 1:length(cmps)
+            px,py=pos(k); isnan(px) && continue
+            CM.text!(ax,px,py;text=string(k),color=:white,fontsize=9,font=:bold,align=(:center,:center))
+        end
+    end
+    swatch(c)=CM.PolyElement(color=c,strokecolor=CM.RGBf(0.6,0.6,0.6),strokewidth=0.5)   # stroke: air is white-on-white
+    els=CM.PolyElement[]; lbls=String[]
+    for (k,(n,c)) in TIS; push!(els,swatch(c)); push!(lbls,"$(Int(k)) · $n"); end
+    push!(els,swatch(INS)); push!(lbls,"$(ROD0)+ · W/L/P mixture\n        slots (per-scan comps)")
+    CM.Legend(f[1,3],els,lbls,"label → material";framevisible=false,labelsize=10,titlesize=10)
+    CM.Label(f[0,:],"QRM-thorax phantom label map — 512² recon grid, mid-slice, phantom-frame mm · posterior down · numbers index mcomps/scomps";fontsize=12,font=:bold)
+    safe_save(joinpath(ASSET,"fig_phantom_labels.png"),f); f
+end
+
 # ╔═╡ aaaa0031-0000-4000-8000-000000000031
 # ── Noise measurement + the λ fit, ON CALIBRATION. Nothing here is chosen by how smooth it looks,
 # and nothing here touches the held-out scans: §6 fits λ from calibration, this cell shows the work.
@@ -1288,6 +912,382 @@ At the fitted λ=$(TV_LAMBDA), $(_roi_verdict)
 **The map is what TV is for; this table is what proves it did not cheat.**
 """)
 end
+
+# ╔═╡ aaaa0032-0000-4000-8000-000000000032
+# λ side-by-side: raw per-voxel decode vs the FITTED λ, on both geometries. Both panels run the real
+# `deliver` path; only λ differs. λ comes from the calibration fit, so this figure follows the data.
+# GT sits alongside because "which λ" is settled against truth, not by eye.
+begin
+    circ_raw = deliver(map_lo,map_hi,map_m2,mcomps; lambda=0.0)
+    sect_raw = deliver(smap_lo,smap_hi,smap_m2,scomps; lambda=0.0)
+    function pv_stats(rec,m2,comps,rpx)                      # per-voxel f_l vs GT on the eroded cores
+        t=Float64[];r=Float64[];sds=Float64[]
+        for k in 1:length(comps); ci=core_idx(m2,ROD0-1+k,rpx); isempty(ci)&&continue
+            v=[rec[I,2] for I in ci if isfinite(rec[I,2])]; isempty(v)&&continue
+            append!(t,fill(comps[k][2],length(v))); append!(r,v); push!(sds,std(v))
+        end
+        (rmse=sqrt(mean((r.-t).^2)), sd=mean(sds))
+    end
+    LROWS=((circ,circ_raw,map_m2,mcomps,CORE_RPX,"circular"),(sect,sect_raw,smap_m2,scomps,7,"sector"))
+    let f=CM.Figure(size=(1180,780))
+        for (row,(D,R,m2,comps,rpx,nm)) in enumerate(LROWS)
+            hi=findall(!isnan,D.tru[:,:,2]); ci=extrema(getindex.(hi,1)); cj=extrema(getindex.(hi,2)); pad=18
+            rI=max(1,ci[1]-pad):min(size(m2,1),ci[2]+pad); rJ=max(1,cj[1]-pad):min(size(m2,2),cj[2]+pad)
+            sD=pv_stats(D.rec,m2,comps,rpx); sR=pv_stats(R.rec,m2,comps,rpx)
+            _st(st)= st===nothing ? "" : @sprintf("\nper-voxel RMSE %.4f · within-core sd %.4f",st.rmse,st.sd)
+            for (col,(img,ttl,st)) in enumerate(((D.tru[rI,rJ,2],"$nm · true f_l",nothing),
+                                                 (R.rec[rI,rJ,2],"λ=0 — raw per-voxel decode",sR),
+                                                 (D.rec[rI,rJ,2],"λ=$(TV_LAMBDA) — fitted, ships",sD)))
+                ax=CM.Axis(f[row,col];title=ttl*_st(st),titlesize=11,aspect=CM.DataAspect(),yreversed=true)
+                CM.hidedecorations!(ax); hm=CM.heatmap!(ax,img;colormap=:jet,colorrange=(0,1))
+                (row==1&&col==3) && CM.Colorbar(f[:,4],hm;label="f_l")
+            end
+        end
+        CM.Label(f[0,:],"f_l delivered map — raw decode vs fitted λ=$(TV_LAMBDA) (σ_f Huber-TV, simplex=:$(TV_SIMPLEX)); λ fitted on CALIBRATION by golden-section, held-out scans untouched\nROI-level check on the held-out n=$(length(drois)): f_l CCC $(round(rs[i2_ship].m[2].ccc,digits=4)) at λ=$(TV_LAMBDA) vs $(round(rs[1].m[2].ccc,digits=4)) raw — the map gains without the region means paying";fontsize=12,font=:bold)
+        safe_save(joinpath(ASSET,"fig10_lambda_compare.png"),f); f
+    end
+end
+
+# ╔═╡ aaaa0026-0000-4000-8000-000000000026
+# Portable model snapshot — dumps the fitted surface + noise + gate + calibration table to
+# wlp_model_<pair>.toml (stdlib TOML, no BasisSimulator), so the model can be applied outside
+# this notebook. In-notebook, the `wlp_apply` cell below consumes the same coefficients live.
+# The cal table (ROI means/stds + true fractions) lets a new chain refit the same recipe.
+begin
+    import TOML
+    const MODEL_TOML = joinpath(@__DIR__, "wlp_model_$(PTAG).toml")
+    open(MODEL_TOML, "w") do io
+        TOML.print(io, Dict(
+            "pair" => Dict("E_low_keV"=>ELO, "E_high_keV"=>EHI),
+            "endpoints_hu" => Dict("water"=>collect(PW), "lipid"=>collect(PL), "protein"=>collect(PP)),
+            "poly2" => Dict("basis"=>"[1, hLow, hHigh, hLow^2, hHigh^2, hLow*hHigh] -> (fw,fl,fp), normalized by sum",
+                "cw"=>cw, "cl"=>cl, "cp"=>cp, "cl_affine"=>cl_aff),
+            "noise" => Dict("sigma_quad_low"=>sc_lo, "sigma_quad_high"=>sc_hi, "rho"=>ρ,
+                "Sigma_hu"=>[collect(Σhu[i,:]) for i in 1:2], "bias_hu"=>bias_hu),
+            "gate" => Dict("soft_hu_lo"=>SOFT_HU_LO, "soft_hu_hi"=>SOFT_HU_HI),
+            # TV belongs in the snapshot: wlp_apply denoises by default, so a consumer without these
+            # reproduces a different map. λ is weighed against w=1/σ_f², hence O(10), not O(0.01).
+            "tv" => Dict("lambda"=>TV_LAMBDA, "iters"=>TV_ITERS, "eps"=>TV_EPS, "simplex"=>String(TV_SIMPLEX),
+                "form"=>"coupled Huber-TV on (f_l,f_p); den = w + Σ_nbr λ/max(‖∇f‖,eps), w = 1/σ_f²",
+                "simplex_note"=>"project onto {f≥0, f_l+f_p≤1} ONCE on the result, never per sweep: per-sweep rectification is a Jensen bias on any region mean drawn from the map",
+                "lambda_selected_by"=>"golden-section on log10(lambda) in [0.1,100], minimising per-voxel RMSE vs GT over the $(length(CALPREP)) CALIBRATION thoraxes only; held-out circular/sector scans never enter the objective",
+                "lambda_transfers"=>"NO. This lambda is supervised by phantom GT. On real CT with no GT, refit it GT-free at the same noise level (discrepancy principle against the sigma ladder, GCV, or SURE) — do not copy this number across scanners/dose"),
+            "provenance" => Dict("source"=>"wlp_decomposition.jl",
+                "chain"=>"80/140kVp EICT (:dd_fast) -> Cong water/iodine -> FBP $(RECON_N)px/$(Int(RECON_FOV_MM))mm -> VMI $(PTAG) keV; stadium QRM-thorax",
+                "cal_n"=>length(calrois), "r2_fw_fit"=>r2fit(cw,fwc), "test_n"=>length(drois),
+                # scored through the delivered estimator (TV included) — same numbers as §8 and fig5
+                "test_ccc"=>[mw.ccc, ml.ccc, mp.ccc], "test_rmse"=>[mw.rmse, ml.rmse, mp.rmse],
+                "test_slope"=>[mw.slope, ml.slope, mp.slope]),
+            "calibration_table" => Dict("fw"=>fwc, "fl"=>flc, "fp"=>fpc,
+                "hu_low_mean"=>m_lo_cal, "hu_high_mean"=>m_hi_cal,
+                "hu_low_std"=>[r.s_lo for r in calrois], "hu_high_std"=>[r.s_hi for r in calrois],
+                "n_vox"=>[length(r.v_lo) for r in calrois]),
+        ))
+    end
+    Markdown.parse("**Model snapshot** → `$(basename(MODEL_TOML))` (poly2 surface + noise + gate + calibration table; applied live by the `wlp_apply` cell below).")
+end
+
+# ╔═╡ aaaa0027-0000-4000-8000-000000000027
+# One-click product: apply the fitted model to ANY co-registered VMI pair from the same 70/150-keV
+# chain → (f_w, f_l, f_p) maps. No external file, no re-fit — the model IS the live fitted globals
+# (cw,cl,cp,cl_aff, sc_lo,sc_hi, ρ, the soft-tissue gate); this reuses the delivered-map pipeline
+# (fullfield · sigma_f_weight · tv_coupled) verbatim, so the product and the validation share one method.
+begin
+    # tv=true → boundary-agnostic delivered map (2D slice); tv=false → raw per-voxel decode (any dim).
+    function wlp_apply(vmi_low, vmi_high; tv=true)
+        fw, fl, fp = fullfield(vmi_low, vmi_high)
+        tv || return (fw, fl, fp)
+        gate = .!isnan.(fl); w = sigma_f_weight(vmi_low, vmi_high)
+        fl_tv, fp_tv = tv_coupled(fl, fp, gate; lambda=TV_LAMBDA, w=w)
+        fw_tv = map((a, b) -> isnan(a) ? NaN : 1 - a - b, fl_tv, fp_tv)
+        (fw_tv, fl_tv, fp_tv)
+    end
+    let  # invariant: on the cached delivered-map slice, wlp_apply must reproduce the notebook's delivered map
+        fw, fl, fp = wlp_apply(map_lo, map_hi)
+        @assert isequal(cat(fw, fl, fp; dims=3), recmap) "wlp_apply must reproduce the delivered map"
+        ng = count(!isnan, fl); lo, hi = extrema(filter(!isnan, fl))
+        Markdown.parse("**One-click apply** — `fw, fl, fp = wlp_apply(vmi_low, vmi_high)` on a co-registered $(Int(ELO))/$(Int(EHI)) keV VMI pair. Reproduces the delivered map bit-for-bit on the cached slice: $ng gated voxels, f_l ∈ [$(round(lo,digits=2)), $(round(hi,digits=2))].")
+    end
+end
+
+# ╔═╡ aaaa0028-0000-4000-8000-000000000028
+# Raw export: dump every CT scan as an ImageJ-openable .raw (full 512×512×3 z-stack), grouped by role
+# into data/recon/{calibration,test}/, with per-label truth in label_comps.csv. Reuses the LIVE sim
+# arrays (no .jls re-read). Column-major Float32/UInt8, little-endian, NOT dim2-reversed (figures use
+# yreversed=true ⇒ ImageJ row 0 = top). Circular sims share the calibration label stack.
+let
+    RECON = joinpath(@__DIR__, "data", "recon")
+    dims3(M) = "$(size(M,1))x$(size(M,2))x$(size(M,3))"
+    wf32(dir, base, kev, M) = write(joinpath(dir, "$(base)_vmi$(kev)keV_$(dims3(M))_float32.raw"), Array{Float32}(M))
+    wu8(dir, base, M)       = write(joinpath(dir, "$(base)_$(dims3(M))_uint8.raw"), Array{UInt8}(M))
+    scan(dir, base, h_lo, h_hi) = (wf32(dir, base, Int(ELO), h_lo); wf32(dir, base, Int(EHI), h_hi))
+    comps_csv(dir, rows) = open(joinpath(dir, "label_comps.csv"), "w") do io
+        println(io, "scan,label,f_water,f_lipid,f_protein")
+        for (name, comps) in rows, (k, c) in enumerate(comps)
+            @printf(io, "%s,%d,%.4f,%.4f,%.4f\n", name, ROD0 - 1 + k, c[1], c[2], c[3])
+        end
+    end
+    rm(RECON; recursive=true, force=true)
+    CAL = joinpath(RECON, "calibration"); TST = joinpath(RECON, "test"); mkpath(CAL); mkpath(TST)
+    NZ = size(map_hi_v, 3)
+    crows = Tuple{String,Any}[]
+    for (i, s) in enumerate(calsims); scan(CAL, "noise_sim$i", s.hu_lo, s.hu_hi); push!(crows, ("noise_sim$i", s.comps)); end
+    scan(CAL, "deliveredmap", map_lo_v, map_hi_v); push!(crows, ("deliveredmap", mcomps))
+    wu8(CAL, "labels", repeat(map_m2, 1, 1, NZ)); comps_csv(CAL, crows)
+    trows = Tuple{String,Any}[]
+    for (i, s) in enumerate(testsims); scan(TST, "circular_sim$i", s.hu_lo, s.hu_hi); push!(trows, ("circular_sim$i", s.comps)); end
+    for (i, s) in enumerate(sectsims); scan(TST, "sector_sim$i", s.hu_lo, s.hu_hi); push!(trows, ("sector_sim$i", s.comps)); end
+    scan(TST, "sector_deliveredmap", smap_lo_v, smap_hi_v); push!(trows, ("sector_deliveredmap", scomps))
+    wu8(TST, "labels_circular", repeat(map_m2, 1, 1, NZ)); wu8(TST, "labels_sector", repeat(smap_m2, 1, 1, NZ)); comps_csv(TST, trows)
+    p = joinpath(CAL, "noise_sim1_vmi$(Int(ELO))keV_512x512x$(NZ)_float32.raw")   # byte-layout round-trip
+    @assert reshape(reinterpret(Float32, read(p)), 512, 512, NZ) == Array{Float32}(calsims[1].hu_lo) "raw round-trip mismatch — byte layout wrong"
+    write(joinpath(RECON, "README_imagej.txt"), """
+ImageJ → File → Import → Raw…
+  Image type       = 32-bit Real  (*_float32.raw)   |   8-bit  (*_labels*_uint8.raw)
+  Width = nx, Height = ny, Number of images = nz (= $(NZ))   ·   ☑ Little-endian byte order
+Column-major, NOT dim2-reversed (notebook figures use yreversed=true ⇒ ImageJ row 0 = top).
+calibration/: noise_sim1..$(length(calsims)) + deliveredmap ; labels = shared insert stack (8..20).
+test/:  circular_sim1..$(length(testsims)) · sector_sim1..$(length(sectsims)) + sector_deliveredmap
+        labels_circular (8..20) · labels_sector (8..23).
+VMI keV pair: $(Int(ELO)) / $(Int(EHI)).  label_comps.csv (per folder) → each scan's per-label
+(f_water, f_lipid, f_protein) ground truth.
+""")
+    Markdown.parse("**Raws exported** → `data/recon/` — calibration: $(2*(length(calsims)+1)) scans, test: $(2*(length(testsims)+length(sectsims)+1)) scans (ImageJ 32-bit, little-endian, $(NZ)-slice stacks). Layout in `README_imagej.txt`.")
+end
+
+# ╔═╡ aaaa0015-0000-4000-8000-000000000015
+md"## 7 · Figures"
+
+# ╔═╡ aaaa0016-0000-4000-8000-000000000016
+# Barycentric triangle + noise-ellipse MLE, in ONE figure: Panel A = the full W/L/P sliver
+# (every test voxel, coloured by whether its raw decode is feasible); Panel B = a zoom on the
+# water–lipid corner showing the Σ noise ellipse and the out-of-triangle ROI means projected
+# back onto the triangle in the Mahalanobis (Σ⁻¹) metric. Rebuilds from the decode-cell globals.
+let
+    # ── per-voxel HU + feasibility across all scored ROIs (circular + sector) ──
+    HUx=Float64[]; HUy=Float64[]; feas=Bool[]
+    for r in allrois, j in eachindex(r.v_lo)
+        d=decode(r.v_lo[j],r.v_hi[j]); push!(HUx,r.v_lo[j]); push!(HUy,r.v_hi[j]); push!(feas, all(d.≥-1e-9))
+    end
+    stride=max(1,length(HUx)÷5000); ss=1:stride:length(HUx)                       # deterministic thin for plotting
+    fin=[i for i in ss if feas[i]]; fout=[i for i in ss if !feas[i]]
+    pv_out=100*count(!,feas)/length(feas)
+    rmx=[r.m_lo for r in allrois]; rmy=[r.m_hi for r in allrois]
+    rout=findall(any(decode(r.m_lo,r.m_hi).<-1e-6) for r in allrois)                 # ROI means outside the simplex
+    condG=cond(Gmat); s70v=sqrt(Σhu[1,1]); s150v=sqrt(Σhu[2,2])
+    CIN=CM.RGBf(0.353,0.655,0.353); COUT=CM.RGBf(0.557,0.373,0.659)                # feasible / infeasible
+    CWv=CM.RGBf(0.231,0.459,0.690); CLv=CM.RGBf(0.910,0.639,0.239); CPv=CM.RGBf(0.757,0.267,0.235)
+    zx0,zx1,zy0,zy1=-125.0,20.0,-95.0,15.0                                          # zoom window (water–lipid corner)
+
+    f=CM.Figure(size=(1180,520))
+    # ── Panel A: the whole triangle (equal aspect ⇒ the sliver is honest) ──
+    axA=CM.Axis(f[1,1];xlabel="HU @ $(Int(ELO)) keV",ylabel="HU @ $(Int(EHI)) keV",
+                title="The W/L/P triangle is a sliver (cond G = $(round(condG,digits=1)))",aspect=CM.DataAspect())
+    CM.poly!(axA,[CM.Point2f(PW...),CM.Point2f(PL...),CM.Point2f(PP...)];color=(:gray,0.10),strokecolor=(:black,0.45),strokewidth=1.2)
+    CM.scatter!(axA,HUx[fin],HUy[fin];color=(CIN,0.30),markersize=3,label="decode inside")
+    CM.scatter!(axA,HUx[fout],HUy[fout];color=(COUT,0.35),markersize=3,label="decode outside ($(round(pv_out,digits=1))%)")
+    for (p,c,t) in ((PW,CWv,"water"),(PL,CLv,"lipid"),(PP,CPv,"protein"))
+        CM.scatter!(axA,[p[1]],[p[2]];color=c,markersize=13,strokecolor=:white,strokewidth=1.2)
+        CM.text!(axA,p[1],p[2];text=t,fontsize=11,color=c,font=:bold,align=(:left,:bottom))
+    end
+    CM.lines!(axA,[zx0,zx1,zx1,zx0,zx0],[zy0,zy0,zy1,zy1,zy0];color=(:black,0.6),linestyle=:dash,linewidth=1.0)
+    CM.text!(axA,zx1,zy1;text="B",fontsize=11,font=:bold,color=(:black,0.7),align=(:left,:bottom))
+    CM.axislegend(axA;position=:lt,framevisible=false,labelsize=9)
+    # ── Panel B: zoom on the water–lipid corner + noise ellipse + MLE projections ──
+    axB=CM.Axis(f[1,2];xlabel="HU @ $(Int(ELO)) keV",ylabel="HU @ $(Int(EHI)) keV",
+                title="Out-of-triangle ROI means → Σ⁻¹ (Mahalanobis) MLE projection",limits=(zx0,zx1,zy0,10.0))
+    CM.poly!(axB,[CM.Point2f(PW...),CM.Point2f(PL...),CM.Point2f(PP...)];color=(:gray,0.10),strokecolor=(:black,0.45),strokewidth=1.2)
+    inz=[i for i in 1:length(HUx) if zx0≤HUx[i]≤zx1 && zy0≤HUy[i]≤zy1]
+    inz=inz[1:max(1,length(inz)÷4000):end]
+    CM.scatter!(axB,HUx[[i for i in inz if feas[i]]],HUy[[i for i in inz if feas[i]]];color=(CIN,0.22),markersize=3)
+    CM.scatter!(axB,HUx[[i for i in inz if !feas[i]]],HUy[[i for i in inz if !feas[i]]];color=(COUT,0.26),markersize=3)
+    ev=eigen(Σhu); anchor=[-84.0,-55.0]                                            # ellipse in empty space below the cloud
+    for k in (1.0,2.0)
+        pts=[anchor.+k.*(sqrt(ev.values[1])*cos(τ).*ev.vectors[:,1].+sqrt(ev.values[2])*sin(τ).*ev.vectors[:,2]) for τ in range(0,2π,length=140)]
+        CM.lines!(axB,first.(pts),last.(pts);color=:black,linewidth=(k==1.0 ? 1.6 : 1.0),linestyle=(k==1.0 ? :solid : :dash))
+    end
+    CM.scatter!(axB,[anchor[1]],[anchor[2]];color=:black,markersize=5)
+    CM.text!(axB,anchor[1],anchor[2]-7;text="noise Σ  (σ₇₀=$(round(s70v,digits=1)), σ₁₅₀=$(round(s150v,digits=1)), ρ=$(round(ρ,digits=2)))\n1σ / 2σ contours",fontsize=8,align=(:center,:top))
+    for i in rout                                                                  # measured mean → feasible edge point
+        θ=Gmat\([rmx[i],rmy[i]].-bias_hu); (fl,fp)=proj_simplex((θ[1],θ[2])); hp=Gmat*[fl,fp]
+        CM.lines!(axB,[rmx[i],hp[1]],[rmy[i],hp[2]];color=COUT,linewidth=1.3)
+        CM.scatter!(axB,[hp[1]],[hp[2]];marker=:utriangle,color=COUT,markersize=8)
+    end
+    CM.scatter!(axB,rmx[rout],rmy[rout];color=COUT,markersize=10,strokecolor=:white,strokewidth=0.9)
+    CM.scatter!(axB,[rmx[i] for i in 1:length(rmx) if !(i in rout)],[rmy[i] for i in 1:length(rmy) if !(i in rout)];color=(CIN,0.6),markersize=7)
+    for (p,c,t) in ((PW,CWv,"water"),(PL,CLv,"lipid")); CM.scatter!(axB,[p[1]],[p[2]];color=c,markersize=13,strokecolor=:white,strokewidth=1.2); CM.text!(axB,p[1],p[2];text=t,fontsize=11,color=c,font=:bold,align=(:left,:bottom)); end
+    CM.Label(f[0,:],"Decomposition triangle + noise model: $(round(pv_out,digits=1))% of voxels decode outside the simplex under noise (96% within 2σ); only $(length(rout))/$(length(allrois)) ROI means need the pooled MLE projection";fontsize=12,font=:bold)
+    safe_save(joinpath(ASSET,"fig_decode_triangle_noise.png"),f); f
+end
+
+# ╔═╡ aaaa0017-0000-4000-8000-000000000017
+let f=CM.Figure(size=(1050,460))
+    ax=CM.Axis(f[1,1];xlabel="HU",ylabel="σ (HU)",title="σ(HU) per energy — convex-quadratic")
+    for (hu,sg,cc,e,col) in ((m_lo_cal,[r.s_lo for r in calrois],sc_lo,ELO,:tomato),(m_hi_cal,[r.s_hi for r in calrois],sc_hi,EHI,:royalblue))
+        CM.scatter!(ax,hu,sg;color=col,markersize=8,label="$(Int(e)) keV"); g=range(minimum(hu),maximum(hu),100); CM.lines!(ax,g,quad_sigma.(Ref(cc),g);color=col)
+    end
+    CM.axislegend(ax;position=:rt)
+    ax2=CM.Axis(f[1,2];xlabel="resid HU$(Int(ELO))",ylabel="resid HU$(Int(EHI))",title="inter-energy ρ=$(round(ρ,digits=2))")
+    idx=rand(1:length(res_lo),min(3000,length(res_lo))); CM.scatter!(ax2,res_lo[idx],res_hi[idx];markersize=3,color=(:purple,0.3))
+    safe_save(joinpath(ASSET,"fig2_noise.png"),f); f
+end
+
+# ╔═╡ aaaa0018-0000-4000-8000-000000000018
+let f=CM.Figure(size=(1520,430))
+    ax=CM.Axis(f[1,1];title="VMI $(Int(EHI)) keV",aspect=CM.DataAspect(),yreversed=true); CM.hidedecorations!(ax); CM.heatmap!(ax,map_hi;colormap=:grays,colorrange=(-200,300))
+    for (col,(img,ttl)) in enumerate(((recmap[:,:,1],"f_w"),(recmap[:,:,2],"f_l"),(recmap[:,:,3],"f_p")))
+        ax2=CM.Axis(f[1,col+1];title=ttl,aspect=CM.DataAspect(),yreversed=true); CM.hidedecorations!(ax2); CM.heatmap!(ax2,img;colormap=:jet,colorrange=(0,1))
+    end
+    CM.Colorbar(f[1,5];colormap=:jet,colorrange=(0,1),label="volume fraction")
+    CM.Label(f[0,:],"Delivered map — per-voxel decode + σ_f-weighted Huber-TV (λ=$(TV_LAMBDA), simplex=:$(TV_SIMPLEX)), boundary-agnostic (lung & bone HU-gated out)";fontsize=13,font=:bold)
+    safe_save(joinpath(ASSET,"fig3_delivered_map.png"),f); f
+end
+
+# ╔═╡ aaaa0019-0000-4000-8000-000000000019
+let f=CM.Figure(size=(1250,440))
+    hi=findall(!isnan,truemap[:,:,2]); ci=extrema(getindex.(hi,1)); cj=extrema(getindex.(hi,2)); pad=28
+    rI=max(1,ci[1]-pad):min(size(map_m2,1),ci[2]+pad); rJ=max(1,cj[1]-pad):min(size(map_m2,2),cj[2]+pad)
+    for (col,(img,ttl)) in enumerate(((truemap[rI,rJ,2],"true f_l (GT regions)"),(recmap[rI,rJ,2],"honest (per-voxel + TV)"),(recmap_gt[rI,rJ,2],"optimistic (GT-boundary pooled)")))
+        ax=CM.Axis(f[1,col];title=ttl,aspect=CM.DataAspect(),yreversed=true); CM.hidedecorations!(ax); hm=CM.heatmap!(ax,img;colormap=:jet,colorrange=(0,1)); col==3&&CM.Colorbar(f[1,4],hm;label="f_l")
+    end
+    CM.Label(f[0,:],"f_l over the heart: honest per-voxel+TV keeps real texture & PVE edges; GT-pooled is flat (uses the boundary we don't have on real fat)";fontsize=12,font=:bold)
+    safe_save(joinpath(ASSET,"fig4_honest_vs_pooled.png"),f); f
+end
+
+# ╔═╡ aaaa0023-0000-4000-8000-000000000023
+# GT vs recovered (jet 0–1) vs signed error (blue–white–red diverging, own colorbar) for ALL THREE materials.
+# Circular phantom.
+let f=CM.Figure(size=(1320,1050)), Dl=circ
+    hi=findall(!isnan,Dl.tru[:,:,2]); ci=extrema(getindex.(hi,1)); cj=extrema(getindex.(hi,2)); pad=25
+    rI=max(1,ci[1]-pad):min(size(Dl.tru,1),ci[2]+pad); rJ=max(1,cj[1]-pad):min(size(Dl.tru,2),cj[2]+pad)
+    for (row,mat) in enumerate(("f_w","f_l","f_p"))
+        tl=Dl.tru[rI,rJ,row]; rf=Dl.rec[rI,rJ,row]
+        rl=[isnan(tl[i,j]) ? NaN : rf[i,j] for i in axes(tl,1),j in axes(tl,2)]
+        er=[isnan(tl[i,j]) ? NaN : rf[i,j]-tl[i,j] for i in axes(tl,1),j in axes(tl,2)]
+        for (col,(img,ttl,cm,cr)) in enumerate(((tl,"true",:jet,(0,1)),(rl,"recovered",:jet,(0,1)),(er,"error",CM.Reverse(:RdBu),(-0.3,0.3))))
+            ax=CM.Axis(f[row,col];title=(row==1 ? ttl : ""),ylabel=(col==1 ? mat : ""),aspect=CM.DataAspect(),yreversed=true)
+            CM.hidedecorations!(ax;label=false); CM.heatmap!(ax,img;colormap=cm,colorrange=cr)
+        end
+    end
+    CM.Colorbar(f[:,4];colormap=:jet,colorrange=(0,1),label="fraction (true / recovered)")
+    CM.Colorbar(f[:,5];colormap=CM.Reverse(:RdBu),colorrange=(-0.3,0.3),label="error (recovered − true)")
+    CM.Label(f[0,:],"Circular phantom — true & recovered (jet 0–1) vs error (blue–white–red), f_w / f_l / f_p";fontsize=13,font=:bold)
+    safe_save(joinpath(ASSET,"fig8_gt_rec_error_circular.png"),f); f
+end
+
+# ╔═╡ aaaa0022-0000-4000-8000-000000000022
+let f=CM.Figure(size=(1520,430))
+    ax=CM.Axis(f[1,1];title="VMI $(Int(EHI)) keV (sector)",aspect=CM.DataAspect(),yreversed=true); CM.hidedecorations!(ax); CM.heatmap!(ax,smap_hi;colormap=:grays,colorrange=(-200,300))
+    for (col,(img,ttl)) in enumerate(((sect.rec[:,:,1],"f_w"),(sect.rec[:,:,2],"f_l"),(sect.rec[:,:,3],"f_p")))
+        ax2=CM.Axis(f[1,col+1];title=ttl,aspect=CM.DataAspect(),yreversed=true); CM.hidedecorations!(ax2); CM.heatmap!(ax2,img;colormap=:jet,colorrange=(0,1))
+    end
+    CM.Colorbar(f[1,5];colormap=:jet,colorrange=(0,1),label="volume fraction")
+    CM.Label(f[0,:],"Delivered map — sector validation phantom (per-voxel decode + σ_f Huber-TV λ=$(TV_LAMBDA), simplex=:$(TV_SIMPLEX), boundary-agnostic)";fontsize=13,font=:bold)
+    safe_save(joinpath(ASSET,"fig7_delivered_map_sector.png"),f); f
+end
+
+# ╔═╡ aaaa0024-0000-4000-8000-000000000024
+# Same triad for the SECTOR validation phantom (held-out shape).
+let f=CM.Figure(size=(1320,1050)), Dl=sect
+    hi=findall(!isnan,Dl.tru[:,:,2]); ci=extrema(getindex.(hi,1)); cj=extrema(getindex.(hi,2)); pad=25
+    rI=max(1,ci[1]-pad):min(size(Dl.tru,1),ci[2]+pad); rJ=max(1,cj[1]-pad):min(size(Dl.tru,2),cj[2]+pad)
+    for (row,mat) in enumerate(("f_w","f_l","f_p"))
+        tl=Dl.tru[rI,rJ,row]; rf=Dl.rec[rI,rJ,row]
+        rl=[isnan(tl[i,j]) ? NaN : rf[i,j] for i in axes(tl,1),j in axes(tl,2)]
+        er=[isnan(tl[i,j]) ? NaN : rf[i,j]-tl[i,j] for i in axes(tl,1),j in axes(tl,2)]
+        for (col,(img,ttl,cm,cr)) in enumerate(((tl,"true",:jet,(0,1)),(rl,"recovered",:jet,(0,1)),(er,"error",CM.Reverse(:RdBu),(-0.3,0.3))))
+            ax=CM.Axis(f[row,col];title=(row==1 ? ttl : ""),ylabel=(col==1 ? mat : ""),aspect=CM.DataAspect(),yreversed=true)
+            CM.hidedecorations!(ax;label=false); CM.heatmap!(ax,img;colormap=cm,colorrange=cr)
+        end
+    end
+    CM.Colorbar(f[:,4];colormap=:jet,colorrange=(0,1),label="fraction (true / recovered)")
+    CM.Colorbar(f[:,5];colormap=CM.Reverse(:RdBu),colorrange=(-0.3,0.3),label="error (recovered − true)")
+    CM.Label(f[0,:],"Sector phantom — true & recovered (jet 0–1) vs error (blue–white–red), f_w / f_l / f_p";fontsize=13,font=:bold)
+    safe_save(joinpath(ASSET,"fig9_gt_rec_error_sector.png"),f); f
+end
+
+# ╔═╡ aaaa0020-0000-4000-8000-000000000020
+let f=CM.Figure(size=(1300,460))
+    for (col,(t,p,mt,sem,nm)) in enumerate(((tfw,pfw,mw,semfw,"f_w"),(tfl,pfl,ml,semfl,"f_l"),(tfp,pfp,mp,semfp,"f_p")))
+        lo=min(minimum(t),minimum(p));hi=max(maximum(t),maximum(p))
+        ax=CM.Axis(f[1,col];xlabel="true $nm",ylabel="recovered",title=nm,aspect=CM.DataAspect(),limits=(lo,hi,lo,hi))
+        CM.lines!(ax,[lo,hi],[lo,hi];color=:gray,linestyle=:dash)
+        CM.errorbars!(ax,t,p,sem;color=(:black,0.55),whiskerwidth=8,linewidth=1.2)   # capped error bars, all 3 materials
+        CM.scatter!(ax,t,p;color=[g==:circular ? :steelblue : :orange for g in geomtag],markersize=8)
+        CM.text!(ax,lo+0.03*(hi-lo),hi-0.05*(hi-lo);text=@sprintf("CCC %.3f\nslope %.2f\nRMSE %.3f\nR² %.3f",mt.ccc,mt.slope,mt.rmse,mt.r2),align=(:left,:top),fontsize=11)
+    end
+    CM.Label(f[0,:],"Recovered vs true (n=$(length(drois)): $(count(==(:circular),geomtag)) circular + $(count(==(:sector),geomtag)) sector · DELIVERED estimator: per-voxel decode + σ_f Huber-TV λ=$(TV_LAMBDA), simplex=:$(TV_SIMPLEX) · eroded-core pool) — blue=circular, orange=sector; error bars = SE of the ROI mean";fontsize=12,font=:bold)
+    safe_save(joinpath(ASSET,"fig5_scatter.png"),f); f
+end
+
+# ╔═╡ aaaa0021-0000-4000-8000-000000000021
+let f=CM.Figure(size=(1250,470)), rr=[r.r for r in integ]
+    ax=CM.Axis(f[1,1];xlabel="fat object radius (mm)",ylabel="recovered / true excess lipid",title="Object-extent measure vs integrated-HU")
+    CM.scatterlines!(ax,rr,[r.naivelip/r.truelip for r in integ];color=:tomato,markersize=13,label="naive (object extent)")
+    CM.scatterlines!(ax,rr,[r.intlip/r.truelip for r in integ];color=:seagreen,markersize=13,label="integrated (+$(Int(FIXED_MARGIN_PX)) px skirt)")
+    CM.hlines!(ax,[1.0];color=:gray,linestyle=:dash); CM.axislegend(ax;position=:rb)
+    ax2=CM.Axis(f[1,2];xlabel="integration margin (recon-px)",ylabel="recovered / true",title="Conservation vs margin")
+    for r in integ; CM.lines!(ax2,r.margins,r.recov./r.truelip;linewidth=2,label=@sprintf("r=%.0f mm",r.r)); end
+    CM.hlines!(ax2,[1.0];color=:gray,linestyle=:dash); CM.vlines!(ax2,[FIXED_MARGIN_PX];color=(:black,0.3),linestyle=:dot); CM.axislegend(ax2;position=:rb)
+    CM.Label(f[0,:],"Partial volume makes the object-extent measure under-report small fat; integrated-HU recovers it via conservation (bg = local muscle)";fontsize=12,font=:bold)
+    safe_save(joinpath(ASSET,"fig6_integrated_hu.png"),f); f
+end
+
+# ╔═╡ aaaa0025-0000-4000-8000-000000000025
+Markdown.parse("""
+## 8 · Conclusion
+
+| fraction | CCC | slope | RMSE |
+|---|---|---|---|
+| **f_water** | **$(round(mw.ccc,digits=3))** | $(round(mw.slope,digits=2)) | $(round(mw.rmse,digits=3)) |
+| f_lipid | $(round(ml.ccc,digits=3)) | $(round(ml.slope,digits=2)) | $(round(ml.rmse,digits=3)) |
+| f_protein | $(round(mp.ccc,digits=3)) | $(round(mp.slope,digits=2)) | $(round(mp.rmse,digits=3)) |
+
+Held-out **circular + sector** (n=$(length(drois))), scored through the **delivered** estimator — per-voxel
+decode + σ\\_f-weighted Huber-TV (λ=$(TV_LAMBDA), simplex=`:$(TV_SIMPLEX)`), the same chain `wlp_apply` ships, so this table and the
+delivered map (fig 3/7) cannot disagree. Detectability: **$(round(Int,100mean(dHU_hi.<5)))% of ROIs < 5 HU at $(Int(EHI)) keV** (mean $(round(mean(dHU_hi),digits=1)) HU).
+
+**keV pair — $(Int(ELO))/$(Int(EHI)).** This pair is intentionally ill-conditioned (150 keV is a clinically
+standard VMI, but the two energies sit above the photoelectric-rich low-keV regime): the W/L/P triangle is a
+near-collinear sliver, **cond(G) = $(round(cond([PL[1]-PW[1] PP[1]-PW[1]; PL[2]-PW[2] PP[2]-PW[2]]),digits=1))**
+(≈3.5× a low-keV pair). Yet the held-out **ROI CCC is unaffected** — the √N eroded-core pooling absorbs the
+per-voxel conditioning penalty, and the inter-energy noise correlation ρ=$(round(ρ,digits=2)) is low enough to
+help the separation. The penalty surfaces only in the per-voxel maps and the integrated-HU total; conditioning
+number alone overpredicts it. The pair is a single `WLP_PAIR` knob.
+
+**Point accuracy** is excellent on the eroded interior cores (all CCC ≥ $(round(minimum((mw.ccc,ml.ccc,mp.ccc)),digits=3))) and, as expected on a uniform
+phantom, per-voxel vs pool-then-decode barely differ there (f\\_l CCC $(round(ml.ccc,digits=3)) vs $(round(ml_pool.ccc,digits=3))). The honesty cost of the ground-truth
+boundary shows up in the **delivered map** (fig 3–4): the boundary-agnostic per-voxel+TV map keeps real texture
+and PVE edges, whereas the GT-pooled map is flat because it uses a boundary real fat doesn't provide.
+
+**The denoiser is fitted, not admired.** λ=$(TV_LAMBDA) is not a setting: it is the golden-section minimiser of
+per-voxel RMSE vs GT over the **calibration** thoraxes ($(_gold.n) evaluations on log₁₀λ ∈ [0.1,100]; §6.5). The
+held-out circular and sector scans are absent from that objective, so the table above is a test score, not a
+training score — and λ carries no literal, so a new scanner, dose or keV pair refits it.
+
+**What it costs, plainly.** The objective is the *map*, and the map is not free at the region level: vs the raw
+decode, the fitted λ leaves f\\_l CCC at $(round(ml.ccc,digits=4)) but multiplies ROI f\\_l RMSE by
+**$(round(_rratio,digits=2))×**. That is the honest price of a per-voxel objective, and it is quoted rather than
+buried in CCC's third decimal — CCC is dominated by the between-ROI spread and is nearly blind to this. Anyone
+who needs region means more than maps should state an ROI-aware objective **and fit it on calibration**; what is
+not allowed is tuning λ against the held-out table.
+
+Three traps are worth naming. Smoothness is not accuracy: within-core σ falls monotonically with λ while RMSE
+turns back up, so an eye-tuned λ over-smooths and pays in bias. The simplex projection must fire **once**, not
+per sweep — rectifying every sweep is the same per-voxel Jensen bias this notebook refuses for the pooled decode
+(and on calibration `:once` also happens to beat both `:each` and `:never` on per-voxel RMSE). And λ here is
+supervised by phantom GT, so it **does not transfer to real CT**: with no GT, refit it GT-free at the measured
+noise level — the discrepancy principle against the σ ladder, GCV, or SURE — rather than copying this number.
+
+**Integrated-HU** (fig 6) is the answer to partial-volume underestimation of small fat: the object-extent
+measure loses $(round(Int,100-100*minimum(r.naivelip/r.truelip for r in integ)))% of a 4 mm fat object, while
+integrating an affine decode over the object+skirt with a local muscle background recovers it to
+$(round(Int,100*minimum(r.intlip/r.truelip for r in integ)))–$(round(Int,100*maximum(r.intlip/r.truelip for r in integ)))% via mass conservation. The affine decode carries a separate
+$(round(Int,100*(FAT_AFF/IFL-1)))% composition bias at f_l=$(IFL) (linearization error), common to both estimators. Real-data caveats:
+integrated-HU fixes the *numerator* (total lipid) — a region *mean* still needs a segmentation denominator; the
+local background must be a field (not a constant) because PVAT muscle isn't uniform; and conservation is exact
+only for linear/FBP recon, so a clinical DLIR/QIR transfer must re-earn it empirically.
+""")
 
 # ╔═╡ Cell order:
 # ╟─aaaa0002-0000-4000-8000-000000000002
