@@ -603,98 +603,27 @@ begin
     acf_x = acf1d(rimg_hi,ACF_LAG,1); acf_y = acf1d(rimg_hi,ACF_LAG,2)
     acf_len = 1+2*sum(max.(acf_x[2:end],0.0))            # ≈ voxels per independent sample along x
 
-    # ── SURE: the same fit WITHOUT ground truth, so the rule transfers off the phantom ───────────
-    # LAM_GT above is supervised by phantom GT and therefore cannot be computed on a patient. SURE
-    # (Stein 1981) estimates the risk from the noise model alone: for y = x + ε, ε ~ N(0,diag(σ²)),
-    #     SURE(λ) = ‖x̂_λ(y) − y‖² − Σσ² + 2·Σ σ²·∂x̂_i/∂y_i        E[SURE] = ‖x̂_λ − x‖²
-    # so minimising SURE ≈ minimising true MSE, with x unknown. The divergence has no closed form for
-    # an iterated clamped TV, so it is probed Monte-Carlo (Ramani, Blu & Unser 2008):
-    #     Σσ²∂x̂_i/∂y_i = tr(DJ) ≈ bᵀD(x̂(y+εb) − x̂(y))/ε ,  b ~ N(0,I),  D = diag(σ²)
-    # Applied in the FRACTION domain: y = the per-voxel decode, σ_f from the measured ladder pushed
-    # through the decode gradient — no GT anywhere, only quantities a real scan also provides.
+    # ── SURE: RESULT ONLY. The estimator is not re-run — it cost ~50 TV solves per execution to
+    # re-derive a number that does not ship, and whose precision is illusory anyway (below).
     #
-    # TWO ASSUMPTIONS THIS PIPELINE VIOLATES, stated up front and measured below, not waved past:
-    #  (a) independence. Our own ACF says lag-1 ≈ 0.45, so ε is NOT white. SURE's noise term Σσ² only
-    #      needs the diagonal and survives, but the divergence term should be tr(ΣJ), not σ²tr(J).
-    #      The residual bias is 2[Σσ²J_ii − tr(ΣJ)] ≤ 0 for a positive smoother and positive
-    #      correlation, i.e. SURE UNDER-states the risk, most where the smoother spreads.
-    #  (b) SURE targets E[y] — the decode's own noiseless output — not the true fractions. Any decode
-    #      bias is invisible to it. That is fine for choosing λ (TV cannot fix decode bias) but it
-    #      means SURE ≈ GT only if the decode is near-unbiased on these compositions.
-    # The phantom is the one place both can be checked: λ_SURE vs LAM_GT is the transfer evidence.
-    # SURE must be summed over the SAME voxels cal_pv_rmse scores, or the two objectives are simply
-    # measuring different regions and any disagreement is meaningless. TV still RUNS on the full
-    # field (a core voxel's neighbours matter); only the risk sum is restricted to the cores.
-    CALCORE = let m=falses(size(map_m2))
-        for k in 1:NHEART, I in core_idx(map_m2,ROD0-1+k,CORE_RPX); m[I]=true; end; m
-    end
-    # Correlated probe. With coloured noise the divergence term must be tr(ΣJ), not σ²tr(J), and
-    # tr(ΣJ) = E[bᵀJb] for b ~ N(0,Σ) — so the FIX is simply to draw the probe with the measured
-    # spatial correlation instead of white. Σ = D^½ C D^½: synthesize C by blurring white noise with
-    # a separable Gaussian whose lag-1 ACF matches the measured one, then rescale per-voxel by σ_f.
-    _kwidth(a1)= sqrt(-1/(4*log(clamp(a1,1e-3,0.99))))     # Gaussian width giving lag-1 ACF = a1
-    function _corr_field(rng,sz,σx,σy)
-        z=randn(rng,sz); nx,ny=sz
-        kx=[exp(-(d^2)/(2σx^2)) for d in -3:3]; kx./=sum(kx)
-        ky=[exp(-(d^2)/(2σy^2)) for d in -3:3]; ky./=sum(ky)
-        t=zeros(nx,ny); o=zeros(nx,ny)
-        @inbounds for j in 1:ny, i in 1:nx
-            a=0.0; for (n,d) in enumerate(-3:3); a+=kx[n]*z[clamp(i+d,1,nx),j]; end; t[i,j]=a; end
-        @inbounds for j in 1:ny, i in 1:nx
-            a=0.0; for (n,d) in enumerate(-3:3); a+=ky[n]*t[i,clamp(j+d,1,ny)]; end; o[i,j]=a; end
-        o ./ std(o)                                        # unit variance ⇒ correlation only
-    end
-    # The probe is drawn CORRELATED, not white. Textbook (white) SURE was tried and returns a
-    # NEGATIVE risk over most of the λ range here — impossible for an MSE, and exactly the sign the
-    # algebra predicts once the noise is correlated. So the white variant is not offered as an option.
-    # Threaded like cal_pv_rmse, with one caveat that matters: the RNG is seeded PER SCAN, not shared.
-    # A shared stream would make the draws depend on thread interleaving and the estimate would stop
-    # being reproducible. Per-scan seeds keep it deterministic and independent of thread count.
-    function sure_risk(lam; simplex=TV_SIMPLEX, seed=20260715)
-        part = Vector{Tuple{Float64,Int}}(undef, length(CALPREP))
-        σkx=_kwidth(acf_x[2]); σky=_kwidth(acf_y[2])
-        Threads.@threads for i in eachindex(CALPREP)
-            s = CALPREP[i]; rng = Random.MersenneTwister(seed + i)
-            tot=0.0; n=0
-            yl=s.P.f0[2]; yp=s.P.f0[3]; gate=s.P.gate
-            xl,xp = tv_coupled(yl,yp,gate; lambda=lam,w=s.P.w,simplex=simplex)
-            # Draw b ~ N(0,Σ) with Σ = D^½ C D^½ (C = the measured ACF) and use tr(ΣJ) = E[bᵀJb],
-            # with (Jb) ≈ (x̂(y+εb) − x̂(y))/ε. σ lives INSIDE b, so no σ² factor in the sum below.
-            εp = 1e-3                                                       # step ≪ 1; b already carries σ_f
-            ul,up = (_corr_field(rng,size(yl),σkx,σky), _corr_field(rng,size(yp),σkx,σky))
-            bl = ul .* map(v->isfinite(v) ? sqrt(v) : 0.0, s.P.v.vl)
-            bp = up .* map(v->isfinite(v) ? sqrt(v) : 0.0, s.P.v.vp)
-            pl,pp = tv_coupled(yl.+εp.*bl, yp.+εp.*bp, gate; lambda=lam,w=s.P.w,simplex=simplex)
-            @inbounds for I in CartesianIndices(yl)
-                (gate[I] && CALCORE[I]) || continue
-                σl2=s.P.v.vl[I]; σp2=s.P.v.vp[I]
-                (isfinite(σl2) && isfinite(σp2)) || continue
-                tot += (xl[I]-yl[I])^2 + (xp[I]-yp[I])^2 - σl2 - σp2 +      # ‖x̂−y‖² − tr(Σ) ...
-                       2*(bl[I]*(pl[I]-xl[I]) + bp[I]*(pp[I]-xp[I]))/εp     # ... + 2 tr(ΣJ)
-                n += 2
-            end
-            part[i]=(tot,n)
-        end
-        sum(first.(part))/sum(last.(part))           # ≈ per-component MSE (may go negative: unbiased ⇒ noisy)
-    end
-    # SURE costs 2 TV solves per scan per λ (x̂(y) and x̂(y+εb)), so golden-sectioning it to 5% cost
-    # ~110 TV solves — for a REFERENCE that does not ship. A coarse log grid resolves "what would a
-    # GT-free rule have picked" perfectly well; λ_SURE's precision is the grid spacing, and is quoted
-    # as such. The shipped λ_GT still gets the golden section, because it is the one that matters.
-    # Report the SIGNED risk: a negative estimate is impossible for a true MSE, so clipping it to 0
-    # would hide the estimator failing. §6.5 checks the sign rather than assuming it.
-    SURE_GRID  = [1.0,2.0,4.0,8.0,16.0,32.0]
-    sure_curve = [sure_risk(l) for l in SURE_GRID]
-    LAM_SURE   = SURE_GRID[argmin(sure_curve)]           # GT-free reference; does NOT ship
+    # WHAT WAS MEASURED (2026-07-15, this scanner / 70-150 keV / :once, MC-SURE with a correlated
+    # probe — the white-noise probe returns a NEGATIVE risk here, impossible for an MSE, because the
+    # noise is not white: lag-1 ACF ≈ 0.45). A GT-free rule lands at λ ≈ 4–8 and UNDER-smooths
+    # relative to the GT-supervised λ=12, costing ×1.02–1.23 in calibration per-voxel RMSE.
+    #
+    # The range is not sloppiness: the SURE basin is only ~9% deep, so a one-probe MC argmin is seed
+    # noise. Re-seeding moved it 4.42 → 8.0 and the cost ×1.23 → ×1.02. Read it as an order of
+    # magnitude, never as a number. Full derivation and both probes: git 8bba550 / 89d9153.
+    #
+    # STALE IF THE CONFIG MOVES. Unlike LAM_GT (refitted every run), this is a recorded measurement
+    # for THIS keV pair and scanner. Change WLP_PAIR or the dose and it no longer describes anything
+    # — re-derive it from the git history above rather than trusting the constant.
+    const LAM_SURE = 8.0                                             # recorded, NOT fitted; does NOT ship
+    const LAM_SURE_RANGE = (4.0, 8.0)                                # seed-to-seed spread of the argmin
 
-    # SURE is what ships: it is computable on a patient, where LAM_GT is not. LAM_GT stays as the
-    # phantom's verdict on whether that was allowed — quantified as the RMSE actually paid for using
-    # the GT-free rule instead of the oracle one.
     # ── What ships: the GT-supervised λ. ─────────────────────────────────────────────────────────
-    # LAM_SURE above is kept as a REFERENCE, not as the product: it is what a GT-free rule would have
-    # picked, and the phantom measures what that would have cost. It does not ship — see §6.5.
     TV_LAMBDA  = LAM_GT
-    _sure_cost = cal_pv_rmse(LAM_SURE)/cal_pv_rmse(LAM_GT)           # 1.00 ⇒ SURE would have lost nothing
+    _sure_cost = cal_pv_rmse(LAM_SURE)/cal_pv_rmse(LAM_GT)           # cheap: 1 λ, reused by fig10 + §8
     function deliver(m_lo,m_hi,m2,comps; lambda=TV_LAMBDA, simplex=TV_SIMPLEX)
         f0=fullfield(m_lo,m_hi); gate=.!isnan.(f0[2]); w=sigma_f_weight(m_lo,m_hi)
         fl_tv,fp_tv=tv_coupled(f0[2],f0[3],gate; lambda=lambda,w=w,simplex=simplex)
@@ -738,12 +667,21 @@ begin
             fl,fp = lambda≤0 ? (s.P.f0[2],s.P.f0[3]) :
                     tv_coupled(s.P.f0[2],s.P.f0[3],s.P.gate; lambda=lambda,w=s.P.w,simplex=simplex)
             D=(map((a,b)-> isnan(a) ? NaN : 1-a-b, fl,fp), fl, fp)
+            R=(map((a,b)-> isnan(a) ? NaN : 1-a-b, s.P.f0[2],s.P.f0[3]), s.P.f0[2], s.P.f0[3])  # RAW decode
             for k in 1:s.nins
                 ci=s.cores[k]; isempty(ci)&&continue
                 v=[Float64[D[c][I] for I in ci if isfinite(D[c][I])] for c in 1:3]
-                any(isempty,v) && continue
+                r=[Float64[R[c][I] for I in ci if isfinite(R[c][I])] for c in 1:3]
+                (any(isempty,v) || any(isempty,r)) && continue
+                # SEM of the ROI MEAN — the quantity fig5 plots. Two corrections vs std(v)/√N:
+                #  (a) from the RAW decode, not the TV'd map. TV crushes the within-core scatter but
+                #      leaves the ROI mean (and its uncertainty) essentially unchanged, so std of the
+                #      smoothed map understates the mean's error by ~5× at the shipped λ. The ROI
+                #      mean's error is set by the noise, and the noise is what `r` still carries.
+                #  (b) √n_eff, not √N: the noise is correlated (lag-1 ACF ≈ $(round(acf_x[2],digits=2))), so ≈acf_len voxels
+                #      buy one independent sample. Dividing by √N would understate it by √acf_len.
                 push!(o,(geom=s.geom, t=s.img.comps[k], p=ntuple(c->mean(v[c]),3),
-                         sem=ntuple(c->std(v[c])/sqrt(length(v[c])),3), nvox=length(v[1])))
+                         sem=ntuple(c->std(r[c])/sqrt(length(r[c])/acf_len),3), nvox=length(v[1])))
             end
             parts[i]=o
         end
@@ -870,15 +808,10 @@ begin
     LAMS=[0.3,1.0,3.0,5.0,10.0,15.0,20.0,30.0,50.0,100.0]
     cal_curve  = [cal_pv_rmse(l) for l in LAMS]
     cal_mse    = cal_curve.^2                                    # SURE estimates MSE — compare like with like
-    # The SURE curve is NOT recomputed here — §6 already evaluated it on SURE_GRID to pick LAM_SURE,
-    # and SURE costs 2 TV solves per scan per λ. One curve, one home, displayed twice.
+    # SURE is not re-run here either — §6 records its result. Only the GT curve is live.
     _tag(l)= l==TV_LAMBDA ? " ← **ships**" : ""
     _rows=join(["| $(l) | $(round(cal_curve[i],digits=4)) | $(round(cal_mse[i],digits=5)) |$(_tag(l))"
                 for (i,l) in enumerate(LAMS)],"\n")
-    _srows=join(["| $(l) | $(round(sure_curve[i],digits=5)) |$(l==LAM_SURE ? " ← SURE argmin (reference)" : "")"
-                 for (i,l) in enumerate(SURE_GRID)],"\n")
-    _neg_c = count(<(0), sure_curve)                             # a negative MSE estimate = broken
-    _ss = sort(sure_curve); _s1, _s2 = _ss[1], _ss[2]            # basin depth: min vs runner-up
 
     # (5) Clamp schedule — also decided on calibration, and by a principle: never rectify per-voxel
     # before averaging (Jensen). The measurement only confirms what §6 already refuses.
@@ -919,15 +852,9 @@ Its probe is drawn **correlated**, not white: our own ACF says lag-1 = $(round(a
 |---|---|---|---|
 $(_rows)
 
-The SURE reference, on its own grid (§6 evaluates it there to pick λ_SURE; it costs 2 TV solves per scan per λ, so it is resolved to the grid spacing and quoted as such — precision no one spends, since it does not ship):
+**The SURE reference is a recorded result, not a live computation** (§6, `LAM_SURE`). Re-running it cost ~50 TV solves per execution to re-derive a number that does not ship. Measured on this scanner / keV pair with a **correlated** probe — the textbook white-noise probe returns a *negative* risk here, impossible for an MSE, because the noise is not white (lag-1 ACF $(round(acf_x[2],digits=2))).
 
-| λ | SURE risk (GT-free) | |
-|---|---|---|
-$(_srows)
-
-Sanity check on the reference: SURE's risk is negative at **$(_neg_c)/$(length(SURE_GRID))** λ values (0 = physical throughout — a negative risk estimate would mean the estimator is broken, as the white-noise probe was).
-
-**Do not over-read λ_SURE.** It is a **one-probe** Monte-Carlo estimate and the basin it sits in is shallow — here $(round(_s1,digits=5)) at λ=$(LAM_SURE) versus $(round(_s2,digits=5)) at the runner-up, a gap of only ~$(round(Int,100*(_s2/_s1-1)))%. Re-seeding the probe moves the argmin by a factor of ~2 (it landed on 4.4 under a different seed, costing ×1.23 instead of ×$(round(_sure_cost,digits=2))). So the reference says **"a GT-free rule lands in the same order of magnitude and under-smooths"** — it does not pin a number. Averaging K probes would shrink that spread by √K at K× the cost; not spent, because the reference does not ship.
+**Do not over-read it.** The SURE basin is only ~9% deep, so a one-probe MC argmin is seed noise: re-seeding moved it λ$(LAM_SURE_RANGE[1]) → λ$(LAM_SURE_RANGE[2]) and the cost ×1.23 → ×$(round(_sure_cost,digits=2)). The reference says **"a GT-free rule lands at λ≈$(LAM_SURE_RANGE[1])–$(LAM_SURE_RANGE[2]) and under-smooths vs λ=$(LAM_GT)"** — an order of magnitude, never a number. It is stale if `WLP_PAIR` or the scanner changes; re-derive from git (8bba550 / 89d9153) rather than trusting the constant.
 
 | rule | GT-free? | λ | per-voxel RMSE | vs oracle |
 |---|---|---|---|---|
@@ -1267,7 +1194,7 @@ let f=CM.Figure(size=(1300,460))
         CM.scatter!(ax,t,p;color=[g==:circular ? :steelblue : :orange for g in geomtag],markersize=8)
         CM.text!(ax,lo+0.03*(hi-lo),hi-0.05*(hi-lo);text=@sprintf("CCC %.3f\nslope %.2f\nRMSE %.3f\nR² %.3f",mt.ccc,mt.slope,mt.rmse,mt.r2),align=(:left,:top),fontsize=11)
     end
-    CM.Label(f[0,:],"Recovered vs true (n=$(length(drois)): $(count(==(:circular),geomtag)) circular + $(count(==(:sector),geomtag)) sector · DELIVERED estimator: per-voxel decode + σ_f Huber-TV λ=$(TV_LAMBDA), simplex=:$(TV_SIMPLEX) · eroded-core pool) — blue=circular, orange=sector; error bars = SE of the ROI mean";fontsize=12,font=:bold)
+    CM.Label(f[0,:],"Recovered vs true (n=$(length(drois)): $(count(==(:circular),geomtag)) circular + $(count(==(:sector),geomtag)) sector · DELIVERED estimator: per-voxel decode + σ_f Huber-TV λ=$(TV_LAMBDA), simplex=:$(TV_SIMPLEX) · eroded-core pool) — blue=circular, orange=sector\nerror bars = SE of the ROI mean, from the RAW decode and with n_eff = N/$(round(acf_len,digits=1)) (correlated noise) — NOT std of the TV'd map, which TV shrinks without making the mean any more certain";fontsize=12,font=:bold)
     safe_save(joinpath(ASSET,"fig5_scatter.png"),f); f
 end
 
@@ -1358,7 +1285,7 @@ only for linear/FBP recon, so a clinical DLIR/QIR transfer must re-earn it empir
 # ╠═aaaa0012-0000-4000-8000-000000000012
 # ╟─aaaa0013-0000-4000-8000-000000000013
 # ╠═aaaa0014-0000-4000-8000-000000000014
-# ╠═aaaa0031-0000-4000-8000-000000000031
+# ╟─aaaa0031-0000-4000-8000-000000000031
 # ╠═aaaa0032-0000-4000-8000-000000000032
 # ╠═aaaa0026-0000-4000-8000-000000000026
 # ╠═aaaa0027-0000-4000-8000-000000000027
