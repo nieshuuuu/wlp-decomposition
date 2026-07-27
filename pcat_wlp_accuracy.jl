@@ -69,10 +69,37 @@ for i in eachindex(lab2)
     fw[i], fl[i], fp[i] = f
 end
 
+# ── ROI erosion ───────────────────────────────────────────────────────────────────────
+# Erode the WHOLE-CUFF mask, then intersect with each subring — not each subring separately.
+# Adjacent subrings differ by ~0.01 in lipid fraction, so the boundaries BETWEEN them carry no
+# meaningful contamination; only the boundary against non-fat tissue (vessel wall inside,
+# myocardium/background outside) does. Measured: at 2 voxels, whole-cuff keeps 1208 pixels over
+# 13 regions where per-subring keeps 137 over 6, for the same bias reduction.
+const ERODE = length(ARGS) >= 1 ? parse(Int, ARGS[1]) : 2
+function erode2(mask::BitMatrix, n::Int)
+    n <= 0 && return mask
+    m = copy(mask)
+    for _ in 1:n
+        p = copy(m)
+        @inbounds for j in 2:size(m, 2)-1, i in 2:size(m, 1)-1
+            m[i, j] = p[i, j] & p[i-1, j] & p[i+1, j] & p[i, j-1] & p[i, j+1]
+        end
+        m[1, :] .= false; m[end, :] .= false; m[:, 1] .= false; m[:, end] .= false
+    end
+    m
+end
+cuff = falses(size(lab2))
+for (vi, _) in enumerate(VESSELS), k in 1:K
+    cuff .|= (lab2 .== UInt8(fat_label(k, vi - 1)))
+end
+const CUFF_E = erode2(cuff, ERODE)
+@info "ROI erosion = $ERODE voxel(s) off the cuff boundary; " *
+      "$(count(cuff)) -> $(count(CUFF_E)) PCAT pixels"
+
 rows = NamedTuple[]
 for (vi, v) in enumerate(VESSELS), k in 1:K
     l = fat_label(k, vi - 1)
-    idx = findall(==(UInt8(l)), lab2)
+    idx = [i for i in findall(==(UInt8(l)), lab2) if CUFF_E[i]]
     isempty(idx) && continue
     sel = [i for i in idx if !isnan(fw[i])]
     length(sel) < 20 && continue                  # too few pixels for a region mean
@@ -130,7 +157,7 @@ for (s, name, _) in MATS
         l = fat_label(k, vi - 1); t = D.gt[l]
         gi = s === :w ? t[1] : (s === :l ? t[2] : t[3])
         for i in findall(==(UInt8(l)), lab2)
-            isnan(F[i]) && continue
+            (CUFF_E[i] && !isnan(F[i])) || continue
             push!(gv, gi); push!(mv, F[i])
         end
     end
@@ -164,7 +191,7 @@ theo_hu(m, E) = (mw = BS.compute_μ_at_energy(WATER_M, E);
 hubias = NamedTuple[]
 for r in rows
     l = fat_label(r.subring, findfirst(==(r.vessel), VESSELS) - 1)
-    idx = findall(==(UInt8(l)), lab2)
+    idx = [i for i in findall(==(UInt8(l)), lab2) if CUFF_E[i]]
     m = wlpmat(D.gt[l]...)
     push!(hubias, (vessel = r.vessel, subring = r.subring, n = length(idx),
                    d70 = mean(hlo2[idx]) - theo_hu(m, 70.0)))
@@ -233,10 +260,10 @@ let ax = CM.Axis(fig[2, 1:3];
 end
 CM.Label(fig[0, :],
     "PCAT water/lipid/protein decomposition accuracy — FEBio phantom, no iodine, " *
-    "70/150 keV VMI, region means over $(length(rows)) (vessel, subring) regions";
+    "70/150 keV VMI, ROI eroded $(ERODE) voxel(s) off the cuff boundary, $(length(rows)) regions";
     fontsize = 17, font = :bold)
-CM.save(joinpath(OUT, "pcat_wlp_accuracy.png"), fig; px_per_unit = 2)
-println("\nfigure -> $(joinpath(OUT, "pcat_wlp_accuracy.png"))")
+CM.save(joinpath(OUT, "pcat_wlp_accuracy_erode$(ERODE).png"), fig; px_per_unit = 2)
+println("\nfigure -> $(joinpath(OUT, "pcat_wlp_accuracy_erode$(ERODE).png"))")
 
 open(joinpath(OUT, "pcat_wlp_regions.csv"), "w") do io
     println(io, "vessel,group,subring,n_pixels,gt_water,gt_lipid,gt_protein," *
