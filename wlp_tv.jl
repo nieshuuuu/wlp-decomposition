@@ -39,6 +39,10 @@ scalar `[tv.lambda]` (the pre-model behaviour) when the card predates the model.
 function wlp_lambda_map(model, fl0, fp0, valid)
     tv = model["tv"]
     haskey(tv, "lambda_model") || return Float64(tv["lambda"])
+    lm = tv["lambda_model"]
+    # The card decides, not the caller: the surface loses on a held-out geometry at the very
+    # quantity it was fitted on, so it is carried but off by default (`verdict` says why).
+    get(lm, "default", false) || return Float64(tv["lambda"])
     c = Float64.(tv["lambda_model"]["coeff"])
     lo, hi = Float64.(tv["lambda_model"]["log10_clamp"])
     lam = zeros(Float64, size(fl0))

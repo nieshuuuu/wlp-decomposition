@@ -618,21 +618,39 @@ begin
         y1,y2,y3 = ys[j-1],ys[j],ys[j+1]; d = y1-2y2+y3
         d≤0 ? LGL[j] : clamp(LGL[j] + _lgh*(y1-y3)/(2d), LGL[j-1], LGL[j+1])
     end
-    lam_fl=Float64[]; lam_fp=Float64[]; lam_y=Float64[]
+    lam_fl=Float64[]; lam_fp=Float64[]; lam_y=Float64[]; _sfl_diag=Float64[]
     for i in eachindex(CALPREP), k in 1:NHEART
         ys = [_lcurves[j][i,k] for j in eachindex(LAMS_FIT)]
         all(isfinite,ys) || continue
         push!(lam_y, refine_min(ys))
         push!(lam_fl, CALPREP[i].img.comps[k][2]); push!(lam_fp, CALPREP[i].img.comps[k][3])
+        # σ_f at this insert's own HU pair — the ONLY channel that is a pure per-voxel composition
+        # quantity, hence geometry-free by construction. Kept so "is the λ↔material trend just the
+        # noise model?" can be answered with a number instead of a story.
+        s = CALPREP[i].img
+        a = mean(Float64(s.hu_lo[:,:,_midz(s.hu_lo)][I]) for I in CALPREP[i].cores[k])
+        b = mean(Float64(s.hu_hi[:,:,_midz(s.hu_hi)][I]) for I in CALPREP[i].cores[k])
+        gl = (dot(cl,dpoly_lo(a,b)), dot(cl,dpoly_hi(a,b))); σa = quad_sigma(sc_lo,a); σb = quad_sigma(sc_hi,b)
+        push!(_sfl_diag, sqrt(max(gl[1]^2*σa^2 + gl[2]^2*σb^2 + 2ρ*gl[1]*gl[2]*σa*σb, 1e-12)))
     end
-    _nsat = count(y -> y≥LGL[end]-1e-9 || y≤LGL[1]+1e-9, lam_y)      # λ* stuck at a grid edge
-    Xlam = hcat(ones(length(lam_y)), lam_fl, lam_fp)
-    LM_C = Xlam\lam_y                                                # log₁₀λ = c₀ + c₁f_l + c₂f_p
-    r2_lam = 1 - sum((Xlam*LM_C .- lam_y).^2)/sum((lam_y .- mean(lam_y)).^2)
+    # A λ* pinned to a grid edge is CENSORED — the objective never turned back up inside the
+    # bracket, so that insert has no measured optimum. Regressing through it fits the bracket,
+    # not the data, so those points are DROPPED (and counted) rather than silently included.
+    _sat = [y ≥ LGL[end]-1e-9 || y ≤ LGL[1]+1e-9 for y in lam_y]; _nsat = count(_sat)
+    _keep = .!_sat
+    Xlam = hcat(ones(count(_keep)), lam_fl[_keep], lam_fp[_keep]); _ylam = lam_y[_keep]
+    LM_C = Xlam\_ylam                                                # log₁₀λ = c₀ + c₁f_l + c₂f_p
+    r2_lam = 1 - sum((Xlam*LM_C .- _ylam).^2)/sum((_ylam .- mean(_ylam)).^2)
     # t-statistics: R² alone can't say whether the composition dependence is real or noise, and
     # that is the whole claim behind shipping a model instead of a number.
-    _lam_s2 = sum((Xlam*LM_C .- lam_y).^2)/(length(lam_y)-size(Xlam,2)); _lam_cov = _lam_s2*inv(Xlam'Xlam)
+    _lam_s2 = sum((Xlam*LM_C .- _ylam).^2)/(length(_ylam)-size(Xlam,2)); _lam_cov = _lam_s2*inv(Xlam'Xlam)
     _lam_se = [sqrt(_lam_cov[i,i]) for i in 1:size(Xlam,2)]; _tstat = LM_C ./ _lam_se
+    # Is the trend just the noise model? Regress λ* on log σ_f alone, then beside the fractions.
+    _lsig = log10.(_sfl_diag[_keep])
+    _Xs = hcat(ones(length(_ylam)), _lsig); _cs = _Xs\_ylam
+    _r2_sig = 1 - sum((_Xs*_cs .- _ylam).^2)/sum((_ylam .- mean(_ylam)).^2)
+    _Xj = hcat(Xlam, _lsig); _cj = _Xj\_ylam; _rj = _ylam .- _Xj*_cj
+    _Cj = (sum(_rj.^2)/(length(_ylam)-size(_Xj,2)))*inv(_Xj'_Xj); _t_sig = _cj[4]/sqrt(_Cj[4,4])
     # λ evaluation clamps f̂ onto the simplex FIRST — this is not the scoring path (no Jensen
     # concern), it only keeps a noise-blown f̂ from exponentiating λ off the fitted range.
     lam_at(fl,fp) = (l=clamp(fl,0.0,1.0); p=clamp(fp,0.0,1.0-l);
@@ -683,13 +701,18 @@ begin
     const LAM_SURE = 8.0                                             # recorded, NOT fitted; does NOT ship
     const LAM_SURE_RANGE = (4.0, 8.0)                                # seed-to-seed spread of the argmin
 
-    # ── What ships: the λ(f̂) model. The global GT λ stays as the scalar reference. ──────────────
-    TV_LAMBDA  = LAM_GT                                              # global scalar — reference only
+    # ── What ships: the global GT λ. λ(f̂) is fitted, available, and NOT the default. ───────────
+    # Rejecting λ(f̂) is not selection-on-held-out: it loses on the sector at the SAME quantity it
+    # was optimised for (per-voxel RMSE), which is precisely what a held-out geometry is for. The
+    # global λ's own held-out cost is at the ROI level — a different quantity from its objective —
+    # so it is reported, not disqualifying. Pass lambda=:model anywhere to use the surface.
+    TV_LAMBDA  = LAM_GT
     _rmse_gt    = cal_pv_rmse(LAM_GT)
     _rmse_model = cal_pv_rmse(:model)
     _model_cost = _rmse_model/_rmse_gt                               # <1 ⇒ λ(f̂) beats the global λ on cal
     _sure_cost = cal_pv_rmse(LAM_SURE)/_rmse_gt                      # cheap: 1 λ, reused by fig10 + §8
-    function deliver(m_lo,m_hi,m2,comps; lambda=:model, simplex=TV_SIMPLEX)
+    const LAMBDA_MODEL_SHIPS = false          # ← the one switch; TOML mirrors it for the consumers
+    function deliver(m_lo,m_hi,m2,comps; lambda=TV_LAMBDA, simplex=TV_SIMPLEX)
         f0=fullfield(m_lo,m_hi); gate=.!isnan.(f0[2]); w=sigma_f_weight(m_lo,m_hi)
         lam = lambda === :model ? lambda_map(f0) : lambda
         fl_tv,fp_tv=tv_coupled(f0[2],f0[3],gate; lambda=lam,w=w,simplex=simplex)
@@ -705,10 +728,10 @@ begin
     circ = deliver(map_lo,map_hi,map_m2,mcomps)
     sect = deliver(smap_lo,smap_hi,smap_m2,scomps)
     recmap=circ.rec; truemap=circ.tru; recmap_gt=circ.recgt
-    # The same two maps under the GLOBAL λ, so "does λ(f̂) actually help?" is answered on the
+    # The same two maps under λ(f̂), so "does the adaptive λ actually help?" is answered on the
     # delivered product — and on the HELD-OUT sector shape, which is the question that matters.
-    circ_glb = deliver(map_lo,map_hi,map_m2,mcomps; lambda=TV_LAMBDA)
-    sect_glb = deliver(smap_lo,smap_hi,smap_m2,scomps; lambda=TV_LAMBDA)
+    circ_mod = deliver(map_lo,map_hi,map_m2,mcomps; lambda=:model)
+    sect_mod = deliver(smap_lo,smap_hi,smap_m2,scomps; lambda=:model)
     function pv_stats(rec,m2,comps,rpx)                      # per-voxel f_l vs GT on the eroded cores
         t=Float64[];r=Float64[];sds=Float64[]
         for k in 1:length(comps); ci=core_idx(m2,ROD0-1+k,rpx); isempty(ci)&&continue
@@ -717,9 +740,9 @@ begin
         end
         (rmse=sqrt(mean((r.-t).^2)), sd=mean(sds))
     end
-    _pv = [(nm=nm, model=pv_stats(D.rec,m2,c,rpx).rmse, global_=pv_stats(G.rec,m2,c,rpx).rmse)
-           for (D,G,m2,c,rpx,nm) in ((circ,circ_glb,map_m2,mcomps,CORE_RPX,"circular\n(calibration geometry)"),
-                                     (sect,sect_glb,smap_m2,scomps,7,"sector\n(HELD-OUT shape)"))]
+    _pv = [(nm=nm, model=pv_stats(M.rec,m2,c,rpx).rmse, global_=pv_stats(G.rec,m2,c,rpx).rmse)
+           for (G,M,m2,c,rpx,nm) in ((circ,circ_mod,map_m2,mcomps,CORE_RPX,"circular\n(calibration geometry)"),
+                                     (sect,sect_mod,smap_m2,scomps,7,"sector\n(HELD-OUT shape)"))]
     _sect_ratio = _pv[2].model/_pv[2].global_            # >1 ⇒ the model does NOT transfer in shape
 
     # ── the scored estimator IS the delivered one ────────────────────────────────────────────────
@@ -742,7 +765,7 @@ begin
         f0=fullfield(lo,hi)
         TESTPREP[i] = (; s..., P=(f0=f0, gate=.!isnan.(f0[2]), w=sigma_f_weight(lo,hi)))
     end
-    function score_rois(; lambda=:model, simplex=TV_SIMPLEX)
+    function score_rois(; lambda=TV_LAMBDA, simplex=TV_SIMPLEX)
         parts = Vector{Vector{NamedTuple}}(undef, length(TESTPREP))
         Threads.@threads for i in eachindex(TESTPREP)
             s = TESTPREP[i]; o = NamedTuple[]
@@ -809,7 +832,7 @@ begin
 
 **Out-of-triangle** — $(round(100nvox_out/nvox_all,digits=1))% of per-voxel decodes ($(nvox_out)/$(nvox_all)) land outside the W/L/P simplex, as expected when noise scatters a near-edge composition; they are *not* rectified per-voxel. Only $(nroi_out)/$(length(allrois)) ROI *means* land outside, and those go through the noise-ellipse MLE projection.
 
-**Held-out test** — n=$(length(drois)) ($(count(==(:circular),geomtag)) circular + $(count(==(:sector),geomtag)) sector), scored in §8 through the delivered estimator: per-voxel decode + σ\\_f Huber-TV with the **λ(f̂) model** (log₁₀λ = $(round(LM_C[1],digits=2)) + $(round(LM_C[2],digits=2))·f\\_l + $(round(LM_C[3],digits=2))·f\\_p; global reference λ=$(TV_LAMBDA)), simplex=`:$(TV_SIMPLEX)`.
+**Held-out test** — n=$(length(drois)) ($(count(==(:circular),geomtag)) circular + $(count(==(:sector),geomtag)) sector), scored in §8 through the delivered estimator: per-voxel decode + σ\\_f Huber-TV at the global λ=$(TV_LAMBDA), simplex=`:$(TV_SIMPLEX)`. The λ(f̂) surface (log₁₀λ = $(round(LM_C[1],digits=2)) + $(round(LM_C[2],digits=2))·f\\_l + $(round(LM_C[3],digits=2))·f\\_p) is fitted and reported in §6.5, not used here.
 """)
 end
 
@@ -892,10 +915,10 @@ begin
     cal_curve  = [cal_pv_rmse(l) for l in LAMS]
     cal_mse    = cal_curve.^2                                    # SURE estimates MSE — compare like with like
     # SURE is not re-run here either — §6 records its result. Only the GT curve is live.
-    _tag(l)= l==TV_LAMBDA ? " ← **global λ (reference)**" : ""
+    _tag(l)= l==TV_LAMBDA ? " ← **ships**" : ""
     _rows=join(["| $(l) | $(round(cal_curve[i],digits=4)) | $(round(cal_mse[i],digits=5)) |$(_tag(l))"
                 for (i,l) in enumerate(LAMS)],"\n")
-    _rows *= "\n| **λ(f̂) model** | **$(round(_rmse_model,digits=4))** | $(round(_rmse_model^2,digits=5)) | ← **ships**"
+    _rows *= "\n| **λ(f̂) model** | $(round(_rmse_model,digits=4)) | $(round(_rmse_model^2,digits=5)) | ← fitted, not default (fig 12)"
 
     # (5) Clamp schedule — also decided on calibration, and by a principle: never rectify per-voxel
     # before averaging (Jensen). The measurement only confirms what §6 already refuses.
@@ -908,11 +931,11 @@ begin
         (m=[metrics([r.t[c] for r in d],[r.p[c] for r in d]) for c in 1:3], n=length(d)))
     LAMS2=sort(unique(vcat([0.0,3.0,10.0,30.0,100.0],TV_LAMBDA)))
     rs=[roi_stats(l) for l in LAMS2]
-    rs_model=roi_stats(:model)                                       # the shipped λ(f̂) rule, held-out
+    rs_model=roi_stats(:model)                                       # the λ(f̂) rule, held-out (reported)
     i2_ship=findfirst(==(TV_LAMBDA),LAMS2)
-    _rows2=join(["| $(l==0 ? "0 (raw)" : string(l)) | $(round(rs[i].m[1].ccc,digits=4)) | $(round(rs[i].m[2].ccc,digits=4)) | $(round(rs[i].m[3].ccc,digits=4)) | $(round(rs[i].m[2].slope,digits=3)) | $(round(rs[i].m[2].rmse,digits=4)) |$(l==TV_LAMBDA ? " ← **global λ (ref)**" : "")"
+    _rows2=join(["| $(l==0 ? "0 (raw)" : string(l)) | $(round(rs[i].m[1].ccc,digits=4)) | $(round(rs[i].m[2].ccc,digits=4)) | $(round(rs[i].m[3].ccc,digits=4)) | $(round(rs[i].m[2].slope,digits=3)) | $(round(rs[i].m[2].rmse,digits=4)) |$(l==TV_LAMBDA ? " ← **ships**" : "")"
                 for (i,l) in enumerate(LAMS2)],"\n")
-    _rows2 *= "\n| **λ(f̂) model** | $(round(rs_model.m[1].ccc,digits=4)) | $(round(rs_model.m[2].ccc,digits=4)) | $(round(rs_model.m[3].ccc,digits=4)) | $(round(rs_model.m[2].slope,digits=3)) | $(round(rs_model.m[2].rmse,digits=4)) | ← **ships**"
+    _rows2 *= "\n| **λ(f̂) model** | $(round(rs_model.m[1].ccc,digits=4)) | $(round(rs_model.m[2].ccc,digits=4)) | $(round(rs_model.m[3].ccc,digits=4)) | $(round(rs_model.m[2].slope,digits=3)) | $(round(rs_model.m[2].rmse,digits=4)) | ← fitted, not default"
     # CCC is nearly insensitive here — it is dominated by the huge between-ROI spread, so a real
     # degradation hides in its 3rd decimal. Judge the ROI cost on RMSE, and quote both.
     _dccc=rs_model.m[2].ccc-rs[1].m[2].ccc
@@ -930,9 +953,9 @@ begin
 
 **Global λ = $(LAM_GT)** (scalar reference) — golden-section on log₁₀λ ∈ [0.1,100], $(_gold.n) evaluations, minimising **per-voxel RMSE vs GT across the $(length(CALPREP)) calibration thoraxes**. Bracket check (λ/3, λ, λ×3): **$(_uni_ok ? "unimodal ✓" : "NOT unimodal ✗ — golden-section's assumption fails, treat λ as unverified")**. The held-out scans (circular test + sector) are **not** in this objective and never were.
 
-**What ships is λ(f̂)** — one λ for every tissue is a compromise, because the per-voxel optimum trades noise (σ\\_f, a function of composition through the σ(HU) ladder) against bleed-in bias (insert↔muscle contrast, also a function of composition). Measured per (scan, insert) on the same calibration thoraxes — $(length(LAMS_FIT))-point log grid + parabolic refinement, one TV per scan per λ shared by all inserts — the optima regress as **log₁₀λ\\* = $(round(LM_C[1],digits=2)) + $(round(LM_C[2],digits=2))·f\\_l + $(round(LM_C[3],digits=2))·f\\_p** (n=$(length(lam_y)), R²=$(round(r2_lam,digits=2)), $(_nsat) grid-edge saturated). At deployment λ is evaluated **per voxel at the raw decode clamped onto the simplex** — observable on any image, no GT needed — and clamped to the fitted log₁₀ range [$(round(LGL[1],digits=2)), $(round(LGL[end],digits=2))]. Calibration per-voxel RMSE: **$(round(_rmse_model,digits=4)) vs $(round(_rmse_gt,digits=4)) global (×$(round(_model_cost,digits=3)))**. It ships because it wins on **calibration**, which is the only set allowed to choose it.
+**λ(f̂) is fitted and available, but the SHIPPED default is the global λ.** Measured per (scan, insert) on the calibration thoraxes — $(length(LAMS_FIT))-point log grid over λ ∈ [$(round(LAMS_FIT[1],digits=2)), $(round(Int,LAMS_FIT[end]))] + parabolic refinement, one TV per scan per λ shared by all inserts, **censored optima dropped** ($(_nsat)/$(length(lam_y)) never turned back up inside the bracket) — the surviving optima regress as **log₁₀λ\\* = $(round(LM_C[1],digits=2)) + $(round(LM_C[2],digits=2))·f\\_l + $(round(LM_C[3],digits=2))·f\\_p** (n=$(length(_ylam)), R²=$(round(r2_lam,digits=2))). It beats the global λ on calibration per-voxel RMSE (**$(round(_rmse_model,digits=4)) vs $(round(_rmse_gt,digits=4)), ×$(round(_model_cost,digits=3))**) and loses on the held-out sector (×$(round(_sect_ratio,digits=2))). Pass `lambda=:model` to `deliver`/`score_rois` to use it; §6.5's diagnostic (fig 12) is why it is not the default.
 
-**The composition dependence is real; the fitted model is not portable across geometry.** Both halves are measured (fig 11). Real: the lipid coefficient is $(round(LM_C[2],digits=2)) with t = $(round(_tstat[2],digits=1)) — λ\\* genuinely falls as lipid rises, which is what the σ(HU) ladder predicts, since a lipid-rich voxel decodes with smaller σ\\_f and needs less regularization. Not portable: **R² is only $(round(r2_lam,digits=2))**, $(_nsat)/$(length(lam_y)) inserts saturate the λ-grid ceiling, and on the **held-out sector geometry the model costs ×$(round(_sect_ratio,digits=2)) per-voxel RMSE against the single global λ** while winning ×$(round(_pv[1].model/_pv[1].global_,digits=2)) on the calibration geometry. Three parameters fitted to $(length(lam_y)) noisy per-insert optima buy a calibration win and give it back on a shape they never saw — the λ\\* of a ø$(round(2*INS_R,digits=1)) mm disc is confounded with the disc's own surface-to-volume ratio, and a wedge has a different one. **Anyone whose target is a held-out shape should ship the global λ instead**; the composition trend is the finding here, the 3-parameter surface is not yet the estimator.
+**Why λ\\* moves with composition — and it is NOT the noise channel.** The obvious explanation is wrong, and measuring it is what shows that: σ\\_f varies only $(round(100*(maximum(_sfl_diag)/minimum(_sfl_diag)-1),digits=1))% across the whole composition range (σ\\_f(f\\_l) ∈ [$(round(minimum(_sfl_diag),digits=4)), $(round(maximum(_sfl_diag),digits=4))]) while λ\\* spans a factor of $(round(10^(maximum(_ylam)-minimum(_ylam)),digits=1)). Regressed alone, log σ\\_f explains R² = $(round(_r2_sig,digits=2)) of log₁₀λ\\*; put it beside the fractions and it drops to t = $(round(_t_sig,digits=2)). σ\\_f is the one channel that is a **pure per-voxel composition quantity**, geometry-free by construction — and it is flat here. So the dependence lives in the *bias* channel: the contrast TV imports across a boundary. That is a relation between a voxel and its neighbours, which is exactly what "geometry" means.
 
 **λ_GT is also uncomputable on a patient** — it needs truth. So **SURE** (Stein 1981; MC divergence per Ramani, Blu & Unser 2008) is carried alongside as the GT-free **reference**: it infers risk from the noise model alone (σ ladder, decode gradient, image), all of which a real scan has. It does **not** ship. Its job here is to say what a GT-free λ would have cost, and the phantom is the only place that can be measured.
 
@@ -967,7 +990,7 @@ Neither fit ever sees the held-out scans; λ carries no literal.
 |---|---|---|---|---|---|
 $(_rows2)
 
-With the shipped λ(f̂) model, $(_roi_verdict)
+At the shipped global λ=$(TV_LAMBDA), $(_roi_verdict)
 
 **This is the trade, and removing the leak is what exposed it.** The objective above is *per-voxel* RMSE — the map. It is not free at the region level, and it never was: averaging ~$(round(Int,mean(r.nvox for r in drois))) core voxels is already a ≈$(round(Int,sqrt(mean(r.nvox for r in drois))))× denoiser holding the insert boundary as an oracle the delivered map never gets, so TV has almost no variance left to remove there and mostly bias to add. A λ tuned to look good on *this* table would be tuned on held-out data — the exact leak §6 now forbids. So the honest options are: keep the per-voxel objective and accept the region-mean cost quoted above (what ships), or state an explicitly ROI-aware objective **and fit it on calibration too**. What is no longer available is reading a number off this table.
 
@@ -984,9 +1007,9 @@ begin
     sect_raw = deliver(smap_lo,smap_hi,smap_m2,scomps; lambda=0.0)
     circ_sur = deliver(map_lo,map_hi,map_m2,mcomps; lambda=LAM_SURE)      # GT-free reference map
     sect_sur = deliver(smap_lo,smap_hi,smap_m2,scomps; lambda=LAM_SURE)
-    # circ_glb/sect_glb (global-λ maps) and pv_stats live in the decode cell — the λ(f̂)-vs-global
+    # circ_mod/sect_mod (λ(f̂) maps) and pv_stats live in the decode cell — the λ(f̂)-vs-global
     # comparison they feed is quoted in §6.5 and the model card, which both run before this figure.
-    LROWS=((circ,circ_raw,circ_sur,circ_glb,map_m2,mcomps,CORE_RPX,"circular"),(sect,sect_raw,sect_sur,sect_glb,smap_m2,scomps,7,"sector"))
+    LROWS=((circ,circ_raw,circ_sur,circ_mod,map_m2,mcomps,CORE_RPX,"circular"),(sect,sect_raw,sect_sur,sect_mod,smap_m2,scomps,7,"sector"))
     let f=CM.Figure(size=(1820,760))
         for (row,(D,R,S,G,m2,comps,rpx,nm)) in enumerate(LROWS)
             hi=findall(!isnan,D.tru[:,:,2]); ci=extrema(getindex.(hi,1)); cj=extrema(getindex.(hi,2)); pad=18
@@ -996,8 +1019,8 @@ begin
             for (col,(img,ttl,st)) in enumerate(((D.tru[rI,rJ,2],"$nm · true f_l",nothing),
                                                  (R.rec[rI,rJ,2],"λ=0 — raw per-voxel decode",sR),
                                                  (S.rec[rI,rJ,2],"λ=$(LAM_SURE) — SURE (GT-free ref)",sS),
-                                                 (G.rec[rI,rJ,2],"λ=$(TV_LAMBDA) — global GT λ (ref)",sG),
-                                                 (D.rec[rI,rJ,2],"λ(f̂) model — ships",sD)))
+                                                 (G.rec[rI,rJ,2],"λ(f̂) model — fitted, NOT default",sG),
+                                                 (D.rec[rI,rJ,2],"λ=$(TV_LAMBDA) — global GT λ, ships",sD)))
                 ax=CM.Axis(f[row,col];title=ttl*_st(st),titlesize=11,aspect=CM.DataAspect(),yreversed=true)
                 CM.hidedecorations!(ax); hm=CM.heatmap!(ax,img;colormap=:jet,colorrange=(0,1))
                 (row==1&&col==5) && CM.Colorbar(f[:,6],hm;label="f_l")
@@ -1009,43 +1032,44 @@ begin
 end
 
 # ╔═╡ aaaa0033-0000-4000-8000-000000000033
-# Does λ actually depend on the composition? The claim behind the shipped λ(f̂), tested rather
-# than asserted: every calibration insert's own optimal λ*, plotted against its true fractions.
-# Panel A is the raw relation (colour = f_p, so the second coefficient is visible as a colour
-# gradient, not just a number); panel B is measured vs predicted, which is where R² lives; panel C
-# is the consequence — per-voxel RMSE of the two λ rules on BOTH geometries, and the sector is
-# where the calibration-fitted model has to earn its win.
+# Does λ actually depend on the composition? Tested rather than asserted: every calibration
+# insert's own optimal λ*, plotted against its true fractions. Panel A is the raw relation (colour
+# = f_p, so the second coefficient is visible as a gradient, not just a number); panel B is
+# measured vs predicted, which is where R² lives; panel C is the consequence — per-voxel RMSE of
+# the two λ rules on BOTH geometries, i.e. where the calibration-fitted surface has to earn its
+# win and does not. Censored λ* (× markers) are excluded from the fit; see fig 12 for why.
 let f=CM.Figure(size=(1500,470))
         # ── A: λ* vs f_l, coloured by f_p ────────────────────────────────────────────────────
         axA=CM.Axis(f[1,1];xlabel="true f_l",ylabel="log₁₀ λ* (this insert's own optimum)",
-            title="λ* falls as lipid rises — the relation the model encodes",titlesize=11)
+            title="λ* falls as lipid rises — real (t=$(round(_tstat[2],digits=1))), but loose",titlesize=11)
         CM.hlines!(axA,[LGL[1],LGL[end]];color=(:black,0.35),linestyle=:dash)
-        CM.text!(axA,0.02,LGL[end];text="λ grid ceiling ($(_nsat)/$(length(lam_y)) inserts saturate here)",
+        CM.text!(axA,0.02,LGL[end];text="λ grid edge ($(_nsat)/$(length(lam_y)) censored ⇒ dropped from the fit)",
                  fontsize=8,align=(:left,:top),color=(:black,0.55))
-        sc=CM.scatter!(axA,lam_fl,lam_y;color=lam_fp,colormap=:viridis,markersize=11,
+        sc=CM.scatter!(axA,lam_fl[_keep],lam_y[_keep];color=lam_fp[_keep],colormap=:viridis,markersize=11,
                        strokecolor=(:black,0.3),strokewidth=0.5)
-        gl=range(minimum(lam_fl),maximum(lam_fl),50)
-        for (q,ls) in ((quantile(lam_fp,0.15),:dot),(median(lam_fp),:solid),(quantile(lam_fp,0.85),:dash))
+        _nsat>0 && CM.scatter!(axA,lam_fl[_sat],lam_y[_sat];color=(:gray,0.5),marker=:xcross,markersize=9)
+        gl=range(minimum(lam_fl[_keep]),maximum(lam_fl[_keep]),50)
+        for (q,ls) in ((quantile(lam_fp[_keep],0.15),:dot),(median(lam_fp[_keep]),:solid),(quantile(lam_fp[_keep],0.85),:dash))
             CM.lines!(axA,gl,LM_C[1].+LM_C[2].*gl.+LM_C[3]*q;color=:black,linestyle=ls,linewidth=1.4)
         end
         CM.text!(axA,0.98,0.98;text="fit at f_p = 15th / 50th / 85th pct\n(dotted / solid / dashed)",
                  space=:relative,align=(:right,:top),fontsize=8)
         CM.Colorbar(f[1,2],sc;label="true f_p",width=11)
         # ── B: measured vs predicted (where R² lives) ────────────────────────────────────────
-        pred=LM_C[1].+LM_C[2].*lam_fl.+LM_C[3].*lam_fp
-        lo=min(minimum(pred),minimum(lam_y));hi=max(maximum(pred),maximum(lam_y))
+        pred=LM_C[1].+LM_C[2].*lam_fl[_keep].+LM_C[3].*lam_fp[_keep]
+        lo=min(minimum(pred),minimum(_ylam));hi=max(maximum(pred),maximum(_ylam))
         axB=CM.Axis(f[1,3];xlabel="predicted log₁₀ λ*",ylabel="measured log₁₀ λ*",aspect=CM.DataAspect(),
             limits=(lo,hi,lo,hi),title="the trend is real but loose",titlesize=11)
         CM.lines!(axB,[lo,hi],[lo,hi];color=:gray,linestyle=:dash)
-        CM.scatter!(axB,pred,lam_y;color=(:steelblue,0.8),markersize=9)
+        CM.scatter!(axB,pred,_ylam;color=(:steelblue,0.8),markersize=9)
         CM.text!(axB,0.03,0.97;space=:relative,align=(:left,:top),fontsize=10,
-            text=@sprintf("R² = %.2f   n = %d\nc = (%.2f, %.2f, %.2f)\nt(f_l) = %.1f   t(f_p) = %.1f",
-                          r2_lam,length(lam_y),LM_C...,_tstat[2],_tstat[3]))
+            text=@sprintf("R² = %.2f   n = %d (%d censored dropped)\nc = (%.2f, %.2f, %.2f)\nt(f_l) = %.1f   t(f_p) = %.1f\nσ_f alone: R² = %.2f   (t = %.2f beside f)",
+                          r2_lam,length(_ylam),_nsat,LM_C...,_tstat[2],_tstat[3],_r2_sig,_t_sig))
         # ── C: the consequence, on both geometries ──────────────────────────────────────────
         axC=CM.Axis(f[1,4];ylabel="per-voxel RMSE vs GT (f_l)",xticks=(1:2,[p.nm for p in _pv]),
             title="…and it does not transfer in shape",titlesize=11)
-        CM.barplot!(axC,repeat(1:2,inner=1).-0.17,[p.global_ for p in _pv];width=0.32,color=:gray70,label="global λ = $(TV_LAMBDA)")
-        CM.barplot!(axC,collect(1:2).+0.17,[p.model for p in _pv];width=0.32,color=:seagreen,label="λ(f̂) model")
+        CM.barplot!(axC,collect(1:2).-0.17,[p.global_ for p in _pv];width=0.32,color=:seagreen,label="global λ = $(TV_LAMBDA) (ships)")
+        CM.barplot!(axC,collect(1:2).+0.17,[p.model for p in _pv];width=0.32,color=:gray70,label="λ(f̂) model (not default)")
         for (i,p) in enumerate(_pv)
             CM.text!(axC,i,max(p.model,p.global_);text=@sprintf("×%.2f",p.model/p.global_),
                      align=(:center,:bottom),fontsize=11,font=:bold,offset=(0,4))
@@ -1138,54 +1162,78 @@ begin
     _push_set!(CALPREP,  _lcurves, NHEART, CIRC_RINGS, :circular)
     _push_set!(SECTPREP, _scurves, NSECT,  SECT_RINGS, :sector)
     _isc = G_geom .=== :circular; _iss = .!_isc
-    # A λ* sitting on a grid edge is censored, not measured — every slope through it is a lie.
-    _pin(m) = count(y -> y≥LGL[end]-1e-9 || y≤LGL[1]+1e-9, G_y[m])
-    _pin_c = _pin(_isc); _pin_s = _pin(_iss)
-    @assert _pin_c + _pin_s == 0 "λ* censored at the grid edge: $(_pin_c)/$(count(_isc)) circular, $(_pin_s)/$(count(_iss)) sector — widen LAMS_FIT"
+    # A λ* on a grid edge is CENSORED, not measured, and every slope drawn through it is a lie.
+    # Widening the grid to λ=10³·⁵ did not clear the sector: its objective has no interior
+    # minimum, so λ* is not an identified quantity there at all (see the curves in panel A).
+    # Pinned points are therefore EXCLUDED from every slope below and counted out loud.
+    _pinned = [y ≥ LGL[end]-1e-9 || y ≤ LGL[1]+1e-9 for y in G_y]
+    _pin_c = count(_pinned .& _isc); _pin_s = count(_pinned .& _iss)
+    _okc = _isc .& .!_pinned; _oks = _iss .& .!_pinned
+    # Mean normalized RMSE(λ) per geometry — the direct evidence for "interior optimum or not".
+    _curve(curves, n) = (C=[mean(skipmissing([isfinite(cv[i,k]) ? cv[i,k] : missing
+                                              for i in axes(cv,1), k in 1:n])) for cv in curves];
+                         C ./ minimum(C))
+    _curve_c = _curve(_lcurves, NHEART); _curve_s = _curve(_scurves, NSECT)
     _ols(X,y) = (c=X\y; r=y.-X*c; s2=sum(r.^2)/(length(y)-size(X,2)); C=s2*inv(X'X);
                  (c=c, t=c./[sqrt(C[i,i]) for i in 1:size(X,2)], r2=1-sum(r.^2)/sum((y.-mean(y)).^2)))
     _one = ones(length(G_y))
     # (1) contrast vs composition, CIRCULAR only (where the shipped model was fitted)
-    Mf  = _ols(hcat(_one[_isc], G_fl[_isc], G_fp[_isc]), G_y[_isc])                    # material only
-    Md  = _ols(hcat(_one[_isc], G_dhu[_isc]), G_y[_isc])                               # contrast only
-    Mfd = _ols(hcat(_one[_isc], G_fl[_isc], G_fp[_isc], G_dhu[_isc]), G_y[_isc])       # both
-    # (2) common-slope test: geometry as a nuisance intercept, then + interaction
-    _d = Float64.(_iss)
-    Mg  = _ols(hcat(_one, _d, G_fl, G_fp), G_y)                                        # shared slope
-    Mgi = _ols(hcat(_one, _d, G_fl, G_fp, _d.*G_fl), G_y)                              # + slope shift
-    _slope_c = _ols(hcat(_one[_isc], G_fl[_isc]), G_y[_isc])
-    _slope_s = _ols(hcat(_one[_iss], G_fl[_iss]), G_y[_iss])
-    let f=CM.Figure(size=(1420,470))
-        axA=CM.Axis(f[1,1];xlabel="true f_l",ylabel="log₁₀ λ*",titlesize=11,
+    Mf  = _ols(hcat(_one[_okc], G_fl[_okc], G_fp[_okc]), G_y[_okc])                    # material only
+    Md  = _ols(hcat(_one[_okc], G_dhu[_okc]), G_y[_okc])                               # contrast only
+    Mfd = _ols(hcat(_one[_okc], G_fl[_okc], G_fp[_okc], G_dhu[_okc]), G_y[_okc])       # both
+    # (2) common-slope test: geometry as a nuisance intercept, then + interaction. Only answerable
+    # if BOTH geometries have enough uncensored λ*; otherwise it is reported as not answerable.
+    _both_ok = _okc .| _oks
+    _testable = count(_oks) ≥ 10
+    _d = Float64.(_iss[_both_ok])
+    Mgi = _testable ? _ols(hcat(_one[_both_ok], _d, G_fl[_both_ok], G_fp[_both_ok], _d.*G_fl[_both_ok]),
+                           G_y[_both_ok]) : nothing
+    _slope_c = _ols(hcat(_one[_okc], G_fl[_okc]), G_y[_okc])
+    _slope_s = count(_oks) ≥ 3 ? _ols(hcat(_one[_oks], G_fl[_oks]), G_y[_oks]) : nothing
+    let f=CM.Figure(size=(1500,470))
+        # ── A: is there an optimum at all? The objective itself, per geometry. ───────────────
+        axA=CM.Axis(f[1,1];xlabel="λ",ylabel="per-voxel RMSE / its own minimum",xscale=log10,
+            titlesize=11,title="λ* exists only where the objective turns back up")
+        CM.lines!(axA,LAMS_FIT,_curve_c;color=:steelblue,linewidth=2.5,label="circular (ø$(round(2*INS_R,digits=1)) mm discs)")
+        CM.lines!(axA,LAMS_FIT,_curve_s;color=:darkorange,linewidth=2.5,label="sector (r ≤ $(Int(SECT_R_MM)) mm wedges)")
+        CM.scatter!(axA,[LAMS_FIT[argmin(_curve_c)]],[minimum(_curve_c)];color=:steelblue,markersize=12)
+        CM.vlines!(axA,[TV_LAMBDA];color=(:black,0.35),linestyle=:dash)
+        CM.text!(axA,TV_LAMBDA,1.0;text=" global λ",fontsize=8,align=(:left,:bottom),color=(:black,0.6))
+        CM.axislegend(axA;position=:rt,framevisible=false,labelsize=9)
+        CM.text!(axA,0.03,0.03;space=:relative,align=(:left,:bottom),fontsize=9,
+            text=@sprintf("censored λ* (pinned at a grid edge):\n  circular %d/%d    sector %d/%d",
+                          _pin_c,count(_isc),_pin_s,count(_iss)))
+        # ── B: the common-slope test, uncensored points only ────────────────────────────────
+        axB=CM.Axis(f[1,2];xlabel="true f_l",ylabel="log₁₀ λ*",titlesize=11,
             title="same slope on both shapes? (geometry = intercept)")
-        for (m,tag,col) in ((_isc,"circular (ø$(round(2*INS_R,digits=1)) mm discs)",:steelblue),
-                            (_iss,"sector (wedges)",:darkorange))
-            CM.scatter!(axA,G_fl[m],G_y[m];color=(col,0.75),markersize=9,label=tag)
+        for (m,tag,col) in ((_okc,"circular (uncensored)",:steelblue),(_oks,"sector (uncensored)",:darkorange))
+            count(m)==0 && continue
+            CM.scatter!(axB,G_fl[m],G_y[m];color=(col,0.75),markersize=9,label=tag)
+            count(m)≥3 || continue
             s=_ols(hcat(ones(count(m)),G_fl[m]),G_y[m]); g=range(extrema(G_fl[m])...,20)
-            CM.lines!(axA,g,s.c[1].+s.c[2].*g;color=col,linewidth=2)
+            CM.lines!(axB,g,s.c[1].+s.c[2].*g;color=col,linewidth=2)
         end
-        CM.axislegend(axA;position=:lb,framevisible=false,labelsize=9)
-        CM.text!(axA,0.98,0.98;space=:relative,align=(:right,:top),fontsize=10,
-            text=@sprintf("slope: circular %+.2f   sector %+.2f\ninteraction t = %+.2f",
-                          _slope_c.c[2],_slope_s.c[2],Mgi.t[5]))
-        axB=CM.Axis(f[1,2];xlabel="|ΔHU| to the 3-px ring outside",ylabel="log₁₀ λ*",titlesize=11,
-            title="…or is it really the contrast?")
-        for (m,col) in ((_isc,:steelblue),(_iss,:darkorange))
-            CM.scatter!(axB,G_dhu[m],G_y[m];color=(col,0.75),markersize=9)
-        end
-        CM.text!(axB,0.98,0.98;space=:relative,align=(:right,:top),fontsize=10,
-            text=@sprintf("circular only:\n  f_l alone      R² %.2f\n  |ΔHU| alone    R² %.2f\n  both           R² %.2f\n  t(f_l|ΔHU) %+.2f   t(ΔHU|f_l) %+.2f",
-                          Mf.r2,Md.r2,Mfd.r2,Mfd.t[2],Mfd.t[4]))
-        axC=CM.Axis(f[1,3];xlabel="true f_l",ylabel="|ΔHU| to the ring",titlesize=11,
-            title="the confound itself: are they collinear?")
+        count(_pinned)>0 && CM.scatter!(axB,G_fl[_pinned],G_y[_pinned];color=(:gray,0.45),marker=:xcross,
+                                        markersize=8,label="censored (excluded)")
+        CM.axislegend(axB;position=:lb,framevisible=false,labelsize=8)
+        CM.text!(axB,0.98,0.98;space=:relative,align=(:right,:top),fontsize=9,
+            text = _testable ?
+                @sprintf("slope: circular %+.2f   sector %+.2f\ninteraction t = %+.2f",
+                         _slope_c.c[2], _slope_s === nothing ? NaN : _slope_s.c[2], Mgi.t[5]) :
+                @sprintf("slope: circular %+.2f (t %+.2f)\nsector NOT ANSWERABLE — only %d/%d\nuncensored λ*, so no common-slope test",
+                         _slope_c.c[2], _slope_c.t[2], count(_oks), count(_iss)))
+        # ── C: material or contrast? (they are collinear by construction here) ──────────────
+        axC=CM.Axis(f[1,3];xlabel="true f_l",ylabel="|ΔHU| to the 3-px ring outside",titlesize=11,
+            title="the confound: material and contrast are the same axis")
         for (m,tag,col) in ((_isc,"circular",:steelblue),(_iss,"sector",:darkorange))
             CM.scatter!(axC,G_fl[m],G_dhu[m];color=(col,0.75),markersize=9,label=tag)
         end
-        CM.text!(axC,0.98,0.98;space=:relative,align=(:right,:top),fontsize=10,
-            text=@sprintf("corr(f_l, |ΔHU|)\n  circular %+.2f\n  sector   %+.2f",
-                          cor(G_fl[_isc],G_dhu[_isc]), cor(G_fl[_iss],G_dhu[_iss])))
         CM.axislegend(axC;position=:lb,framevisible=false,labelsize=9)
-        CM.Label(f[0,:],"Separating λ↔material from λ↔geometry — DIAGNOSTIC (uses held-out sector λ*, so it cannot choose the shipped λ)";fontsize=12,font=:bold)
+        CM.text!(axC,0.98,0.98;space=:relative,align=(:right,:top),fontsize=9,
+            text=@sprintf("corr(f_l, |ΔHU|)  circular %+.2f · sector %+.2f\n\ncircular λ* regression (uncensored, n=%d):\n  f_l only     R² %.2f\n  |ΔHU| only   R² %.2f\n  both         R² %.2f\n  t(f_l|ΔHU) %+.2f   t(ΔHU|f_l) %+.2f",
+                          cor(G_fl[_isc],G_dhu[_isc]), cor(G_fl[_iss],G_dhu[_iss]),
+                          count(_okc), Mf.r2, Md.r2, Mfd.r2, Mfd.t[2], Mfd.t[4]))
+        CM.Label(f[0,:],"Can λ↔material be separated from λ↔geometry? — DIAGNOSTIC (uses held-out sector λ*, so it cannot choose the shipped λ)";fontsize=12,font=:bold)
         safe_save(joinpath(ASSET,"fig12_lambda_material_vs_geometry.png"),f); f
     end
 end
@@ -1210,9 +1258,9 @@ begin
             # TV belongs in the snapshot: wlp_apply denoises by default, so a consumer without these
             # reproduces a different map. λ is weighed against w=1/σ_f², hence O(10), not O(0.01).
             "tv" => Dict("lambda"=>TV_LAMBDA, "iters"=>TV_ITERS, "eps"=>TV_EPS, "simplex"=>String(TV_SIMPLEX),
-                "form"=>"coupled Huber-TV on (f_l,f_p); den = w + Σ_nbr λ/max(‖∇f‖,eps), w = 1/σ_f²; λ per voxel from lambda_model",
+                "form"=>"coupled Huber-TV on (f_l,f_p); den = w + Σ_nbr λ/max(‖∇f‖,eps), w = 1/σ_f²",
                 "simplex_note"=>"project onto {f≥0, f_l+f_p≤1} ONCE on the result, never per sweep: per-sweep rectification is a Jensen bias on any region mean drawn from the map",
-                "lambda_rule"=>"lambda_model (gt_supervised per insert); the scalar lambda is the global reference",
+                "lambda_rule"=>"gt_supervised scalar; lambda_model is fitted and carried but NOT the default (see lambda_model.default and .verdict)",
                 "lambda_selected_by"=>"golden-section on log10(lambda) in [0.1,100], minimising per-voxel RMSE vs GT over the $(length(CALPREP)) CALIBRATION thoraxes only; held-out circular/sector scans never enter the objective",
                 "lambda_sure_reference"=>LAM_SURE,      # GT-free reference, NOT shipped
                 "lambda_sure_cost"=>_sure_cost,         # x oracle per-voxel RMSE if SURE's lambda were used
@@ -1220,13 +1268,16 @@ begin
                     "form"=>"log10(lambda) = c0 + c1*fl + c2*fp, evaluated per voxel at the raw poly2 decode clamped onto the simplex (fl to [0,1], fp to [0,1-fl]); clamp log10(lambda) to log10_clamp",
                     "coeff"=>LM_C, "log10_clamp"=>[LGL[1], LGL[end]],
                     "rule"=>"per-(scan,insert) argmin of per-voxel RMSE vs GT on a $(length(LAMS_FIT))-point log grid + parabolic refinement, $(length(CALPREP)) CALIBRATION thoraxes only; LS regression of log10(lambda*) on (fl,fp)",
-                    "n"=>length(lam_y), "r2"=>r2_lam, "n_grid_edge"=>_nsat,
+                    "default"=>LAMBDA_MODEL_SHIPS,      # consumers read this; false ⇒ use the scalar
+                    "n"=>length(_ylam), "r2"=>r2_lam, "n_censored_dropped"=>_nsat,
                     "t_stats"=>_tstat, "coeff_se"=>_lam_se,
                     "cal_rmse_vs_global"=>_model_cost,  # <1: the model beats the global lambda on calibration
                     # THE CAVEAT, carried with the coefficients so a consumer cannot miss it:
                     "heldout_shape_rmse_vs_global"=>_sect_ratio,
-                    "verdict"=>"The composition dependence is REAL (t(fl)=$(round(_tstat[2],digits=1))) but this 3-parameter surface does NOT transfer across geometry: it wins x$(round(_pv[1].model/_pv[1].global_,digits=2)) per-voxel RMSE on the calibration (circular) geometry and LOSES x$(round(_sect_ratio,digits=2)) on the held-out sector shape, at R2=$(round(r2_lam,digits=2)) with $(_nsat)/$(length(lam_y)) inserts saturating the lambda grid. It ships because calibration is the only set allowed to choose it. If your target is a held-out shape, use the scalar lambda instead.",
-                    "insert_fl"=>lam_fl, "insert_fp"=>lam_fp, "insert_log10_lambda_star"=>lam_y),
+                    "sigma_f_r2"=>_r2_sig, "sigma_f_t_given_fractions"=>_t_sig,
+                    "verdict"=>"NOT the default. lambda* does vary with composition (t(fl)=$(round(_tstat[2],digits=1))), and it is NOT the noise channel: sigma_f varies only $(round(100*(maximum(_sfl_diag)/minimum(_sfl_diag)-1),digits=1))% across the composition range and explains R2=$(round(_r2_sig,digits=2)) alone / t=$(round(_t_sig,digits=2)) beside the fractions. The dependence is in the BIAS channel (contrast across the boundary), which is not separable from geometry here: on the discs corr(f_l,|dHU to the surrounding ring|) is high, so 'material' and 'contrast' fit equally well. Consequence: the surface wins x$(round(_pv[1].model/_pv[1].global_,digits=2)) per-voxel RMSE on the calibration geometry and LOSES x$(round(_sect_ratio,digits=2)) on the held-out sector — worse at the very quantity it was optimised for — so the scalar lambda ships. Set default=true only with evidence from YOUR geometry.",
+                    "insert_fl"=>lam_fl, "insert_fp"=>lam_fp, "insert_log10_lambda_star"=>lam_y,
+                    "insert_censored"=>_sat, "insert_sigma_fl"=>_sfl_diag),
                 "lambda_transfers"=>"The lambda_model FORM transfers (lambda is evaluated at the observable decode, no GT at deployment), but its coefficients — like the scalar lambda — are supervised by THIS chain's phantom GT: refit both on a phantom for a new scanner/dose (insert_fl/fp/log10_lambda_star show the recipe). GT-free MC-SURE (correlated probe — the noise is not white, lag-1 ACF $(round(acf_x[2],digits=2))) was MEASURED as a reference: it picks lambda=$(LAM_SURE) vs $(LAM_GT) and costs x$(round(_sure_cost,digits=3)) per-voxel RMSE, so it is reported, not shipped."),
             "provenance" => Dict("source"=>"wlp_decomposition.jl",
                 "chain"=>"80/140kVp EICT (:dd_fast) -> Cong water/iodine -> FBP $(RECON_N)px/$(Int(RECON_FOV_MM))mm -> VMI $(PTAG) keV; stadium QRM-thorax",
@@ -1250,12 +1301,14 @@ end
 # (fullfield · sigma_f_weight · tv_coupled) verbatim, so the product and the validation share one method.
 begin
     # tv=true → boundary-agnostic delivered map (2D slice); tv=false → raw per-voxel decode (any dim).
-    # λ is NOT a fixed number here: the λ(f̂) model evaluates it per voxel at the raw decode.
-    function wlp_apply(vmi_low, vmi_high; tv=true)
+    # lambda=:model swaps in the λ(f̂) surface (per-voxel λ at the raw decode); the default is the
+    # global λ, because the surface fails its held-out geometry test (§6.5, fig 12).
+    function wlp_apply(vmi_low, vmi_high; tv=true, lambda=TV_LAMBDA)
         fw, fl, fp = fullfield(vmi_low, vmi_high)
         tv || return (fw, fl, fp)
         gate = .!isnan.(fl); w = sigma_f_weight(vmi_low, vmi_high)
-        fl_tv, fp_tv = tv_coupled(fl, fp, gate; lambda=lambda_map((fw, fl, fp)), w=w)
+        lam = lambda === :model ? lambda_map((fw, fl, fp)) : lambda
+        fl_tv, fp_tv = tv_coupled(fl, fp, gate; lambda=lam, w=w)
         fw_tv = map((a, b) -> isnan(a) ? NaN : 1 - a - b, fl_tv, fp_tv)
         (fw_tv, fl_tv, fp_tv)
     end
@@ -1396,7 +1449,7 @@ let f=CM.Figure(size=(1520,430))
         ax2=CM.Axis(f[1,col+1];title=ttl,aspect=CM.DataAspect(),yreversed=true); CM.hidedecorations!(ax2); CM.heatmap!(ax2,img;colormap=:jet,colorrange=(0,1))
     end
     CM.Colorbar(f[1,5];colormap=:jet,colorrange=(0,1),label="volume fraction")
-    CM.Label(f[0,:],"Delivered map — per-voxel decode + σ_f-weighted Huber-TV (λ=λ(f̂) model, simplex=:$(TV_SIMPLEX)), boundary-agnostic (lung & bone HU-gated out)";fontsize=13,font=:bold)
+    CM.Label(f[0,:],"Delivered map — per-voxel decode + σ_f-weighted Huber-TV (λ=$(TV_LAMBDA), simplex=:$(TV_SIMPLEX)), boundary-agnostic (lung & bone HU-gated out)";fontsize=13,font=:bold)
     safe_save(joinpath(ASSET,"fig3_delivered_map.png"),f); f
 end
 
@@ -1407,7 +1460,7 @@ let f=CM.Figure(size=(1520,430))
         ax2=CM.Axis(f[1,col+1];title=ttl,aspect=CM.DataAspect(),yreversed=true); CM.hidedecorations!(ax2); CM.heatmap!(ax2,img;colormap=:jet,colorrange=(0,1))
     end
     CM.Colorbar(f[1,5];colormap=:jet,colorrange=(0,1),label="volume fraction")
-    CM.Label(f[0,:],"Delivered map — sector validation phantom (per-voxel decode + σ_f Huber-TV λ=λ(f̂) model, simplex=:$(TV_SIMPLEX), boundary-agnostic)";fontsize=13,font=:bold)
+    CM.Label(f[0,:],"Delivered map — sector validation phantom (per-voxel decode + σ_f Huber-TV λ=$(TV_LAMBDA), simplex=:$(TV_SIMPLEX), boundary-agnostic)";fontsize=13,font=:bold)
     safe_save(joinpath(ASSET,"fig7_delivered_map_sector.png"),f); f
 end
 
@@ -1473,7 +1526,7 @@ let f=CM.Figure(size=(1300,460))
         CM.scatter!(ax,t,p;color=[g==:circular ? :steelblue : :orange for g in geomtag],markersize=8)
         CM.text!(ax,lo+0.03*(hi-lo),hi-0.05*(hi-lo);text=@sprintf("CCC %.3f\nslope %.2f\nRMSE %.3f\nR² %.3f",mt.ccc,mt.slope,mt.rmse,mt.r2),align=(:left,:top),fontsize=11)
     end
-    CM.Label(f[0,:],"Recovered vs true (n=$(length(drois)): $(count(==(:circular),geomtag)) circular + $(count(==(:sector),geomtag)) sector · DELIVERED estimator: per-voxel decode + σ_f Huber-TV λ=λ(f̂) model, simplex=:$(TV_SIMPLEX) · eroded-core pool) — blue=circular, orange=sector\nerror bars = SE of the ROI mean, from the RAW decode and with n_eff = N/$(round(acf_len,digits=1)) (correlated noise) — NOT std of the TV'd map, which TV shrinks without making the mean any more certain";fontsize=12,font=:bold)
+    CM.Label(f[0,:],"Recovered vs true (n=$(length(drois)): $(count(==(:circular),geomtag)) circular + $(count(==(:sector),geomtag)) sector · DELIVERED estimator: per-voxel decode + σ_f Huber-TV λ=$(TV_LAMBDA), simplex=:$(TV_SIMPLEX) · eroded-core pool) — blue=circular, orange=sector\nerror bars = SE of the ROI mean, from the RAW decode and with n_eff = N/$(round(acf_len,digits=1)) (correlated noise) — NOT std of the TV'd map, which TV shrinks without making the mean any more certain";fontsize=12,font=:bold)
     safe_save(joinpath(ASSET,"fig5_scatter.png"),f); f
 end
 
@@ -1517,26 +1570,33 @@ phantom, per-voxel vs pool-then-decode barely differ there (f\\_l CCC $(round(ml
 boundary shows up in the **delivered map** (fig 3–4): the boundary-agnostic per-voxel+TV map keeps real texture
 and PVE edges, whereas the GT-pooled map is flat because it uses a boundary real fat doesn't provide.
 
-**The denoiser is fitted, not admired — and λ is a model, not a number.** What ships is **λ(f̂)**:
-log₁₀λ = $(round(LM_C[1],digits=2)) + $(round(LM_C[2],digits=2))·f\\_l + $(round(LM_C[3],digits=2))·f\\_p, evaluated
-per voxel at the raw decode clamped onto the simplex (n=$(length(lam_y)) per-insert optima on the **calibration**
-thoraxes, R²=$(round(r2_lam,digits=2)); §6.5, fig 11). The global scalar λ=$(TV_LAMBDA) (golden-section on the same
-objective, $(_gold.n) evaluations) is kept as the reference; the model runs ×$(round(_model_cost,digits=3)) vs it
-on calibration per-voxel RMSE. The held-out circular and sector scans are absent from both objectives, so the
-table above is a test score, not a training score — and λ carries no literal, so a new scanner, dose or keV pair
-refits it.
+**The denoiser is fitted, not admired.** λ=$(TV_LAMBDA) is not a setting: it is the golden-section minimiser of
+per-voxel RMSE vs GT over the **calibration** thoraxes ($(_gold.n) evaluations on log₁₀λ ∈ [0.1,100]; §6.5). The
+held-out circular and sector scans are absent from that objective, so the table above is a test score, not a
+training score — and λ carries no literal, so a new scanner, dose or keV pair refits it.
 
-**λ really does depend on the material — and that is not yet enough to ship a λ(f̂) surface.** The lipid
-coefficient is $(round(LM_C[2],digits=2)) at t = $(round(_tstat[2],digits=1)), the sign the σ(HU) ladder predicts:
-lipid-rich voxels decode with smaller σ\\_f and need less regularization. But R² is only $(round(r2_lam,digits=2)),
-$(_nsat)/$(length(lam_y)) inserts saturate the λ-grid ceiling, and the **held-out sector geometry rejects the
-surface**: ×$(round(_pv[1].model/_pv[1].global_,digits=2)) per-voxel RMSE on the calibration shape,
-×$(round(_sect_ratio,digits=2)) on the sector. Three parameters fitted to $(length(lam_y)) noisy per-insert optima
-buy a calibration win and hand it back on a shape they never saw — the λ\\* of a ø$(round(2*INS_R,digits=1)) mm
-disc is confounded with that disc's own surface-to-volume ratio, and a wedge has a different one. The honest
-reading: **the composition dependence is the finding; the surface is not yet the estimator.** Closing it needs
-λ\\* measured across *geometries* as well as compositions, so the fit can separate the two — not a fourth
-coefficient on the same discs.
+**λ does depend on the material. It still cannot be made into a λ(f̂) estimator here — and the three reasons are
+each measured** (§6.5, figs 11–12). *(i) The dependence is real but it is not the noise channel.* λ\\* falls with
+lipid at t = $(round(_tstat[2],digits=1)), but σ\\_f — the one channel that is a pure per-voxel composition
+quantity, and therefore geometry-free by construction — varies only
+$(round(100*(maximum(_sfl_diag)/minimum(_sfl_diag)-1),digits=1))% across the whole composition range and explains
+R² = $(round(_r2_sig,digits=2)) alone (t = $(round(_t_sig,digits=2)) beside the fractions). What is left is the
+*bias* channel: the contrast TV imports across a boundary, which is a relation between a voxel and its
+neighbours. *(ii) In this phantom, material and contrast are the same axis.* The background is fixed muscle, so
+an insert's f\\_l and its contrast to the surrounding ring are collinear; put both in the regression and R² barely
+moves while neither survives. *(iii) λ\\* is not even identified on the other geometry.* On the sector wedges the
+objective never turns back up — $(_pin_s)/$(count(_iss)) of their λ\\* pin at the top of a grid reaching
+λ=$(round(Int,LAMS_FIT[end])) — because a large, low-perimeter region can absorb unlimited smoothing before the
+boundary reaches its eroded core. A quantity that has an interior optimum on discs and none on wedges is a
+property of the **region**, not of the material in it.
+
+Consequently the surface wins ×$(round(_pv[1].model/_pv[1].global_,digits=2)) per-voxel RMSE on the calibration
+geometry and **loses ×$(round(_sect_ratio,digits=2)) on the held-out sector — worse at the very quantity it was
+optimised for** — so the global λ ships and λ(f̂) is carried, reported, and off by default (`lambda=:model` to
+enable; the model card's `lambda_model.default` flips it for the offline consumers). Rejecting it is not
+selection-on-held-out: a held-out geometry failing at the objective's own metric is exactly what the sector
+phantom exists to detect. Making it work needs λ\\* measured across **geometries** as well as compositions — and
+a per-voxel λ fitted from *global*-λ sweeps also assumes a separability that spatially-varying λ does not have.
 
 **What it costs, plainly.** The objective is the *map*, and the map is not free at the region level: vs the raw
 decode, the fitted λ leaves f\\_l CCC at $(round(ml.ccc,digits=4)) but multiplies ROI f\\_l RMSE by
