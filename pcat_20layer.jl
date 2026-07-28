@@ -152,20 +152,27 @@ for g in ("healthy","diseased"), k in 1:NSHELL
     isempty(idx) && continue
     pv  = [c for c in idx if FATE[c] && !isnan(FW[c])]                  # MMD: geometric only
     gt  = [c for c in idx if ADIPOSE_LO <= H70[c] <= ADIPOSE_HI]        # clinical: HU gate
-    length(pv) < NMIN_TABLE && continue
+    # Each arm stands or falls on ITS OWN voxel count. Testing only the MMD count used to drop the
+    # whole row, which truncated the clinical FAI curve at 17 mm on the diseased side even though
+    # its gated ROI still held 1861-2096 voxels there — the erosion is not part of the FAI
+    # definition, so it must not decide what the FAI curve shows.
+    (length(pv) < NMIN_TABLE && length(gt) < NMIN_TABLE) && continue
+    hasmmd = length(pv) >= NMIN_TABLE
     t = D.gt[labs[1]]
     # Standard error of the ROI mean = per-voxel standard deviation / sqrt(N). These are two
     # different statistics and both are reported; never collapse them into one "sigma". The TV
     # stage correlates neighbouring voxels, so this standard error is a LOWER bound on the true
     # uncertainty of the region mean.
     sem(v) = std(v) / sqrt(length(v))
+    mm(f) = hasmmd ? f() : NaN            # MMD fields are NaN when only the clinical arm survives
     push!(rows, (group=g, shell=k, n_geom=length(idx), n_pv=length(pv), n_gate=length(gt),
                  gt_w=t[1], gt_l=t[2], gt_p=t[3], truthHU=truthHU[labs[1]],
-                 m_w=mean(FW[pv]), m_l=mean(FL[pv]), m_p=mean(FP[pv]),
-                 sd_l=std(FL[pv]), sem_w=sem(FW[pv]), sem_l=sem(FL[pv]), sem_p=sem(FP[pv]),
-                 hu_pv=mean(H70[pv]),
+                 m_w=mm(()->mean(FW[pv])), m_l=mm(()->mean(FL[pv])), m_p=mm(()->mean(FP[pv])),
+                 sd_l=mm(()->std(FL[pv])), sem_w=mm(()->sem(FW[pv])),
+                 sem_l=mm(()->sem(FL[pv])), sem_p=mm(()->sem(FP[pv])),
+                 hu_pv=mm(()->mean(H70[pv])),
                  hu_gate=isempty(gt) ? NaN : mean(H70[gt]),
-                 instat = k >= SHELL_MIN && length(pv) >= NMIN_STAT))
+                 instat = hasmmd && k >= SHELL_MIN && length(pv) >= NMIN_STAT))
 end
 
 println("\n", "="^104)
@@ -186,7 +193,8 @@ srows = [r for r in rows if r.instat]
 excl  = [r for r in rows if !r.instat]
 isempty(excl) || println("\nexcluded from the accuracy statistics (still tabulated above):")
 for r in excl
-    why = r.shell < SHELL_MIN ? "shell < $SHELL_MIN (inside the wall's boundary-artifact zone)" :
+    why = isnan(r.m_l) ? "MMD ROI has only $(r.n_pv) voxels after erosion — clinical arm still scored ($(r.n_gate) gated voxels)" :
+          r.shell < SHELL_MIN ? "shell < $SHELL_MIN (inside the wall's boundary-artifact zone)" :
                                 "n_PV $(r.n_pv) < $NMIN_STAT (standard error of the ROI mean $(round(100r.sem_l,digits=2)) pp)"
     @printf("  %-9s shell %2d — %s\n", r.group, r.shell, why)
 end
@@ -213,10 +221,11 @@ for (s,nm) in ((:w,"Water"),(:l,"Lipid"),(:p,"Protein"))
 end
 println("  medSEM = median standard error of the ROI mean (per-voxel standard deviation / sqrt(N));")
 println("  TV correlates neighbouring voxels, so it is a LOWER bound on the region mean's uncertainty.")
-if length(srows) < length(rows)
-    println("\nfor reference, the same statistics over ALL $(length(rows)) tabulated regions:")
+mrows = [r for r in rows if !isnan(r.m_l)]      # rows whose MMD arm exists at all
+if length(srows) < length(mrows)
+    println("\nfor reference, the same statistics over ALL $(length(mrows)) regions with an MMD ROI:")
     for (s,nm) in ((:w,"Water"),(:l,"Lipid"),(:p,"Protein"))
-        g = [r[Symbol("gt_",s)] for r in rows]; m = [r[Symbol("m_",s)] for r in rows]
+        g = [r[Symbol("gt_",s)] for r in mrows]; m = [r[Symbol("m_",s)] for r in mrows]
         @printf("%-9s %8.4f %8.4f %8.2f %+8.2f\n", nm, ccc(g,m), cor(g,m)^2,
                 100sqrt(mean((m.-g).^2)), 100mean(m.-g))
     end
@@ -238,7 +247,7 @@ SHELL_MIN > 1 && CM.text!(ax1, SHELL_MIN - 0.6, 1.0; space = :relative, align = 
     text = "not scored\n(shell < $SHELL_MIN)", fontsize = 9, color = :gray45,
     offset = (0, -4))
 for g in ("healthy","diseased")
-    rr = [r for r in rows if r.group==g]; isempty(rr) && continue
+    rr = [r for r in rows if r.group==g && !isnan(r.hu_gate)]; isempty(rr) && continue
     sh = [Float64(r.shell) for r in rr]
     CM.lines!(ax1, sh, [r.truthHU for r in rr]; color=COLG[g], linewidth=2, linestyle=:dash)
     CM.scatterlines!(ax1, sh, [r.hu_gate for r in rr]; color=COLG[g], linewidth=2.6, markersize=8)
@@ -266,6 +275,8 @@ ax2 = CM.Axis(fig[1,3]; title="adipose pixels per shell", titlesize=17,
     xlabel="shell (mm)", ylabel="pixels in the ROI", xticks=1:2:20, yscale=log10)
 for g in ("healthy","diseased")
     rr = [r for r in rows if r.group==g]; isempty(rr) && continue
+    rr = [r for r in rr if !isnan(r.m_l)]
+    isempty(rr) && continue
     CM.scatterlines!(ax2, [Float64(r.shell) for r in rr], [Float64(max(r.n_pv,1)) for r in rr];
                      color=COLG[g], markersize=8, label="$g")
 end
@@ -274,7 +285,8 @@ for (col,(s,nm,c)) in enumerate(((:w,"Water",CM.RGBf(.23,.46,.69)),
                                  (:l,"Lipid",CM.RGBf(.90,.60,.10)),
                                  (:p,"Protein",CM.RGBf(.76,.27,.24))))
     g, m = stats[s].g, stats[s].m
-    ge = [r[Symbol("gt_",s)] for r in excl]; me = [r[Symbol("m_",s)] for r in excl]
+    exd = [r for r in excl if !isnan(r.m_l)]        # nothing to plot where the MMD arm is absent
+    ge = [r[Symbol("gt_",s)] for r in exd]; me = [r[Symbol("m_",s)] for r in exd]
     allg = vcat(g, ge); allm = vcat(m, me)
     lo = min(minimum(allg),minimum(allm)); hi = max(maximum(allg),maximum(allm))
     pad = 0.08*(hi-lo)+1e-3; L = (100*(lo-pad), 100*(hi+pad))
@@ -284,7 +296,7 @@ for (col,(s,nm,c)) in enumerate(((:w,"Water",CM.RGBf(.23,.46,.69)),
     # Excluded regions are drawn hollow rather than removed — the statistics quote srows, the plot
     # still shows what was left out and where it sits.
     for grp in ("healthy","diseased")
-        se = [i for i in eachindex(excl) if excl[i].group==grp]
+        se = [i for i in eachindex(exd) if exd[i].group==grp]
         isempty(se) && continue
         CM.scatter!(ax, 100 .* ge[se], 100 .* me[se]; color=:transparent,
             marker = grp=="healthy" ? :circle : :utriangle, markersize=11,
