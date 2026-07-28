@@ -47,7 +47,12 @@ for g in keys(oxford); sort!(oxford[g], by = x -> x[1]); end
 hu_to_frac(hu, ratio) = begin
     fw = (hu - HU_L) / (-HU_L * (1 + ratio) + HU_P * ratio)
     fp = ratio * fw
-    (fw, 1 - fw - fp, fp)
+    f = (fw, 1 - fw - fp, fp)
+    # These become the phantom's GROUND TRUTH (simulated materials + every accuracy score's
+    # x-axis), so an out-of-range fraction must fail here, not propagate silently — today the
+    # fit-grid bounds keep hu in range, but that is an accident of the grid, not an invariant.
+    all(0.0 .<= f .<= 1.0) || error("hu_to_frac out of [0,1]: hu=$hu ratio=$ratio -> $f")
+    f
 end
 
 println("closure check — re-solving the CSV's own HU must return the CSV's own fractions:")

@@ -24,7 +24,7 @@ mkpath(OUT)
 
 # ── phantom geometry (SSoT: matches the raster written by gate_subrings.py) ────────────
 const RAW = "/Users/shunie/Developer/PCATSim.jl/.worktrees/febio-fat-growth/" *
-            "projects/pvat_study_001_febio/xcat/act_kpaP40_K6_640x640x348_uint8.raw"
+            "projects/pvat_study_001_febio/xcat/act_kpaP40_K6shell_640x640x348_uint8.raw"
 const NX, NY, NZ = 640, 640, 348
 const VOXMM = 0.5
 const K = 6                                   # subrings
@@ -38,7 +38,16 @@ const WALL0, LUM0 = 40 + 6K, 46 + 6K          # 76, 82
 # only ~0.03 in f_l over 1-6mm, so a single group gives almost no dynamic range to regress
 # against; both groups are used, assigned alternately per vessel, which is also the clinically
 # meaningful contrast (FAI is a disease marker).
-const CSV = "/Volumes/Molloilab/Shu Nie/water-lipid-protein/oxford_wlp_composition.csv"
+# TISSUE-domain composition, not the clinical CSV. The clinical numbers are already blurred by
+# the scanner's point spread; assigning them as phantom TRUTH and then simulating a CT blurs a
+# second time, so the simulated measurement can never sit on the clinical curve. This file is the
+# profile that, blurred ONCE by this simulation's own point spread (sigma 1.05mm, FWHM 2.47mm),
+# reproduces the clinical curve. Produced by pcat_deconv_design.jl. Set PCAT_USE_CLINICAL=1 to
+# fall back to the raw clinical CSV for comparison.
+const USE_CLINICAL = get(ENV, "PCAT_USE_CLINICAL", "0") == "1"
+const CSV = USE_CLINICAL ?
+    "/Volumes/Molloilab/Shu Nie/water-lipid-protein/oxford_wlp_composition.csv" :
+    joinpath(@__DIR__, "pcat_ct", "oxford_deconvolved_composition.csv")
 const VESSEL_GROUP = Dict("rca1" => "healthy", "lcx" => "healthy", "lad1" => "healthy",
                           "lad2" => "diseased", "rca2" => "diseased", "lad3" => "diseased")
 
@@ -52,6 +61,7 @@ function load_oxford()
             hdr = f; continue
         end
         ix(n) = findfirst(==(n), hdr)
+        ix("group") === nothing && continue
         g = f[ix("group")]; d = round(Int, parse(Float64, f[ix("distance_mm")]))
         comp[(g, d)] = (parse(Float64, f[ix("water_volume_fraction")]),
                         parse(Float64, f[ix("lipid_volume_fraction")]),
@@ -71,6 +81,10 @@ const LIPID = BS.XA.Materials.basis_lipid
 const ΡW, ΡL, ΡP = ρval(WATER), ρval(LIPID), ρval(PROTEIN)
 
 function wlp_material(fw, fl, fp; name = "wlp")
+    # trust boundary: fractions arrive from a CSV and become simulated matter + stored GT —
+    # a negative fraction would build a physically meaningless material without complaint
+    (all((fw, fl, fp) .>= 0.0) && fw + fl + fp ≈ 1.0) ||
+        error("wlp_material: ($fw, $fl, $fp) is not a volume-fraction composition")
     ρ = fw * ΡW + fl * ΡL + fp * ΡP
     mf = (fw * ΡW / ρ, fl * ΡL / ρ, fp * ΡP / ρ)          # volume -> mass fractions
     comp = Dict{Int, Float64}()
@@ -95,7 +109,10 @@ function build_materials()
         10 => M.liver, 11 => M.kidney, 12 => M.spleen, 13 => M.softtissue, 14 => M.spleen,
         23 => M.softtissue, 24 => M.softtissue, 25 => M.softtissue,
         27 => M.softtissue, 28 => M.wholeblood,   # aorta — WHOLE BLOOD, no contrast
-        29 => M.softtissue,                       # pericardium
+        29 => M.adipose,                          # pericardial FAT — 193.9 mL over 113 mm of z,
+                                                  # far too large for a membrane; softtissue here
+                                                  # (53 HU) was also ~3 HU from blood, which is
+                                                  # what flattened the whole mediastinum.
     )
     for l in 15:18; mats[l] = M.heart; end                    # myocardium
     for l in 19:22; mats[l] = M.wholeblood; end               # chambers — NO IODINE
@@ -110,20 +127,40 @@ function build_materials()
         mats[l] = wlp_material(f...; name = "pcat_$(v)_sub$(k)")
         gt[l] = f
     end
+    # 20 distance shells in the pericardial fat (add_distance_shells.py). Composition is a
+    # function of distance and group ONLY — the same rule the grown PCAT follows — so the
+    # phantom finally has ground truth across the full 1-20mm range the Oxford paper reports.
+    for (grp, base) in (("healthy", 88), ("diseased", 108)), k in 1:20
+        f = OXFORD[(grp, k)]
+        l = base + k - 1
+        mats[l] = wlp_material(f...; name = "shell_$(grp)_$(k)mm")
+        gt[l] = f
+    end
     (mats = mats, gt = gt)
 end
 
 # ── load + crop. Keep the FULL transaxial body (attenuation/beam-hardening must be real);
 #    crop only in z to a slab through the coronaries, and zoom the RECON FOV to the heart. ──
-function load_phantom_slab(; nz_slab = 48)
+# Cover the WHOLE heart in z. The PCAT tree spans z 30-225 (98 mm) and the myocardium 37-232,
+# so a thin slab samples almost none of it. The slab is the heart extent plus margin; how much of
+# it the recon actually reconstructs is set by the beam collimation below.
+# The slab only has to span what the beam actually traverses: the reconstructed z window plus
+# the cone spread. At 40 mm collimation the cone half-angle is ~1.8 deg, so rays stay within a
+# few mm of the recon window; a 2x margin is generous. Carrying the full 127 mm heart when only
+# 40 mm is reconstructed just makes the projector walk voxels that never enter the image.
+function load_phantom_slab(; margin = 8)
     v = Array{UInt8}(undef, NX, NY, NZ)
     read!(RAW, v)
-    fatmask = (v .>= 40) .& (v .< LUM0 + 6)
-    zc = [count(@view fatmask[:, :, k]) for k in 1:NZ]
-    zbest = argmax([sum(@view zc[max(k - nz_slab ÷ 2, 1):min(k + nz_slab ÷ 2, NZ)]) for k in 1:NZ])
-    z0 = clamp(zbest - nz_slab ÷ 2, 1, NZ - nz_slab + 1)
-    slab = v[:, :, z0:(z0 + nz_slab - 1)]
-    @info "z slab $(z0):$(z0+nz_slab-1) (richest PCAT), fat voxels in slab = $(count(slab .>= 40 .&& slab .< LUM0+6))"
+    heart = (v .>= 15) .& (v .<= 22)
+    fat = (v .>= 40) .& (v .< LUM0 + 6)
+    zs = [k for k in 1:NZ if any(@view heart[:, :, k]) || any(@view fat[:, :, k])]
+    zmid = (minimum(zs) + maximum(zs)) ÷ 2
+    half = round(Int, RECON_Z_CM * 10 / VOXMM)          # 2x the recon z window
+    z0 = max(zmid - half, minimum(zs) - margin, 1)
+    z1 = min(zmid + half, maximum(zs) + margin, NZ)
+    slab = v[:, :, z0:z1]
+    @info "z slab $(z0):$(z1) = $(z1-z0+1) slices ($(round((z1-z0+1)*VOXMM, digits=1)) mm), " *
+          "covers the whole heart; PCAT voxels in slab = $(count(slab .>= 40 .&& slab .< LUM0+6))"
     (slab = slab, z0 = z0)
 end
 
@@ -137,9 +174,10 @@ const SCANNER = BS.Scanner(source_to_isocenter = 625.6, source_to_detector = 110
 const ELO, EHI = 70.0, 150.0
 const RECON_N = 512
 const RECON_FOV_CM = 18.0                    # ZOOMED to the heart: 180mm / 512 = 0.352 mm/px
-const RECON_NZ = 3
+const RECON_Z_CM = 4.0                       # 40 mm of z — half the heart, for a first look
+const RECON_NZ = 40                          # 1 mm slices — real cardiac CT rarely resolves 0.5 mm
 
-function run_acq(pg; views = 984, collimation = 2.5, seed = 1234, zmed = 1)
+function run_acq(pg; views = 984, collimation = 40.0, seed = 1234, zmed = 1)
     matrix = (RECON_N, RECON_N, RECON_NZ)
     plow  = BS.CTProtocol(kVp = 80,  mA = 407 * 0.65, views = views, rotation_time = 0.5,
                           collimation_mm = collimation, additional_filters = [("Al", 4.5)])
@@ -148,7 +186,7 @@ function run_acq(pg; views = 984, collimation = 2.5, seed = 1234, zmed = 1)
     so = BS.SimOptions(fidelity = :eict, use_noise = true, use_fill_factor = false,
                        use_optical_crosstalk = false, use_scatter = false,
                        projector = :dd_fast, seed = seed)
-    ro = BS.ReconOptions(matrix_size = matrix, fov_cm = RECON_FOV_CM, z_cm = 0.1875)
+    ro = BS.ReconOptions(matrix_size = matrix, fov_cm = RECON_FOV_CM, z_cm = RECON_Z_CM)
     _sim(p) = begin
         ws = BS.create_eict_workspace(SCANNER, p, so, ro, pg)
         BS.simulate!(ws, pg, p, so)
@@ -183,15 +221,25 @@ function run_acq(pg; views = 984, collimation = 2.5, seed = 1234, zmed = 1)
 end
 
 # ══ STAGE: simulate ═══════════════════════════════════════════════════════════════════
-const SIMCACHE = joinpath(OUT, "pcat_acq.jls")
+const SIMCACHE = joinpath(OUT, USE_CLINICAL ? "pcat_acq.jls" : "pcat_acq_shell.jls")
 if STAGE in ("all", "sim") || !isfile(SIMCACHE)
-    @info "building phantom + materials (no iodine; Oxford WLP subrings)"
+    @info "building phantom + materials (no iodine; " * (USE_CLINICAL ? "CLINICAL" : "TISSUE-domain") * " WLP subrings from $(basename(CSV)))"
     ph = load_phantom_slab()
     mg = build_materials()
     for l in unique(ph.slab)
         haskey(mg.mats, Int(l)) || (mg.mats[Int(l)] = BS.XA.Materials.softtissue)
     end
     @info "materials: $(length(mg.mats)) labels, $(length(mg.gt)) PCAT subring materials"
+    let μw70 = BS.compute_μ_at_energy(WATER, ELO), μw150 = BS.compute_μ_at_energy(WATER, EHI)
+        println("  label -> material audit (theoretical HU):")
+        for (l, nm) in ((1,"background"),(4,"muscle"),(6,"lung"),(15,"myocardium"),(19,"chamber blood"),
+                        (28,"aorta"),(29,"pericardial fat"),(WALL0,"vessel wall"),(LUM0,"coronary lumen"))
+            m = mg.mats[l]
+            @printf("    %3d %-16s %-22s HU70 %+8.2f  HU150 %+8.2f\n", l, nm, m.name,
+                    1000*(BS.compute_μ_at_energy(m,ELO)-μw70)/μw70,
+                    1000*(BS.compute_μ_at_energy(m,EHI)-μw150)/μw150)
+        end
+    end
     for k in 1:K
         f = OXFORD[("healthy", k)]
         m = wlp_material(f...)

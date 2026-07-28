@@ -13,7 +13,8 @@ using Printf: @printf
 include(joinpath(@__DIR__, "wlp_tv.jl"))
 
 const OUT = joinpath(@__DIR__, "pcat_ct")
-const D = deserialize(joinpath(OUT, "pcat_acq.jls"))
+const ACQ = get(ENV, "PCAT_ACQ", "pcat_acq_tissue.jls")
+const D = deserialize(joinpath(OUT, ACQ))
 const MODEL = TOML.parsefile(joinpath(@__DIR__, "wlp_model_70_150.toml"))
 const K, VOXMM = 6, 0.5
 const VESSELS = ["rca1", "rca2", "lad1", "lad2", "lad3", "lcx"]
@@ -32,7 +33,9 @@ function decode_raw(hlo, hhi)
     s = sum(f)
     abs(s) < 1e-12 ? (NaN, NaN, NaN) : (f[1]/s, f[2]/s, f[3]/s)
 end
-const LAMBDA = length(ARGS) >= 1 ? parse(Float64, ARGS[1]) : Float64(MODEL["tv"]["lambda"])
+# ARGS[1] forces a scalar λ (dev knob); default is the card's λ(f̂) model, per voxel
+const LAMBDA = length(ARGS) >= 1 ? parse(Float64, ARGS[1]) : nothing
+const LAMTAG = LAMBDA === nothing ? "model" : string(LAMBDA)
 const TVITERS = Int(MODEL["tv"]["iters"]); const TVEPS = Float64(MODEL["tv"]["eps"])
 
 # ── grids + valid z ───────────────────────────────────────────────────────────────────
@@ -74,11 +77,12 @@ for i in eachindex(lab)
     wl[i] = 1 / σ[2]^2; wp[i] = 1 / σ[3]^2
     valid[i] = true
 end
-@info "TV: lambda=$LAMBDA iters=$TVITERS eps=$TVEPS on $(count(valid)) decodable pixels"
-tl, tp = wlp_tv!(rawl, rawp, wl, wp, valid; λ = LAMBDA, iters = TVITERS, eps = TVEPS)
+lam = LAMBDA === nothing ? wlp_lambda_map(MODEL, rawl, rawp, valid) : LAMBDA
+@info "TV: lambda=$LAMTAG iters=$TVITERS eps=$TVEPS on $(count(valid)) decodable pixels"
+tl, tp = wlp_tv!(rawl, rawp, wl, wp, valid; λ = lam, iters = TVITERS, eps = TVEPS)
 for i in eachindex(lab)
     valid[i] || continue
-    dew[i], del[i], dep[i] = wlp_simplex(1 - tl[i] - tp[i], tl[i], tp[i])
+    dew[i], del[i], dep[i] = wlp_simplex(tl[i], tp[i])   # once, after TV: every f in [0,1]
 end
 
 pcat = [40 <= Int(l) < LUM0 for l in lab]
@@ -128,10 +132,10 @@ for (col, (s, name, GT, DE)) in enumerate(MATS)
 end
 CM.Label(fig[0, :],
     "PCAT decomposition: ground truth vs decoded map — slice z=$Z, " *
-    "$(round(PX_MM, digits=3)) mm/px, 1 mm slice, no iodine, poly2 + coupled Huber-TV (lambda=$LAMBDA)";
+    "$(round(PX_MM, digits=3)) mm/px, 1 mm slice, no iodine, poly2 + coupled Huber-TV (lambda=$LAMTAG)";
     fontsize = 18, font = :bold)
-CM.save(joinpath(OUT, "pcat_maps_gt_vs_decoded_lam$(LAMBDA).png"), fig; px_per_unit = 2)
-println("figure -> ", joinpath(OUT, "pcat_maps_gt_vs_decoded_lam$(LAMBDA).png"))
+CM.save(joinpath(OUT, "pcat_maps_gt_vs_decoded_lam$(LAMTAG).png"), fig; px_per_unit = 2)
+println("figure -> ", joinpath(OUT, "pcat_maps_gt_vs_decoded_lam$(LAMTAG).png"))
 
 for (s, name, GT, DE) in MATS
     d = [DE[i] - GT[i] for i in eachindex(lab) if pcat[i] && !isnan(DE[i]) && !isnan(GT[i])]

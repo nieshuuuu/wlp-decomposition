@@ -9,29 +9,40 @@
 # per-voxel RMSE is printed alongside as the honest single-voxel number.
 import BasisSimulator as BS
 import TOML
-using Statistics: mean, std, cor
+using Statistics: mean, std, cor, median
 using Printf: @printf
 using Serialization: deserialize
 using Unitful: @u_str
 import CairoMakie as CM
+include(joinpath(@__DIR__, "wlp_tv.jl"))
 
 const OUT = joinpath(@__DIR__, "pcat_ct")
-const D = deserialize(joinpath(OUT, "pcat_acq.jls"))
+const ACQ = get(ENV, "PCAT_ACQ", "pcat_acq_tissue.jls")
+const D = deserialize(joinpath(OUT, ACQ))
 const MODEL = TOML.parsefile(joinpath(@__DIR__, "wlp_model_70_150.toml"))
 const K, VOXMM = 6, 0.5
 const VESSELS = ["rca1", "rca2", "lad1", "lad2", "lad3", "lcx"]
 const VESSEL_GROUP = Dict("rca1" => "healthy", "lcx" => "healthy", "lad1" => "healthy",
                           "lad2" => "diseased", "rca2" => "diseased", "lad3" => "diseased")
 fat_label(k, i) = 40 + 6 * (K - k) + i
-const RECON_N, RECON_FOV_CM, RECON_NZ = 512, 18.0, 3
+const RECON_N, RECON_FOV_CM, RECON_NZ = 512, 18.0, 40
 const MATRIX = (RECON_N, RECON_N, RECON_NZ)
+const RECON_Z_CM = 4.0
 
 # ── poly2 decode: [1, hLo, hHi, hLo^2, hHi^2, hLo*hHi] -> (fw,fl,fp), normalised by sum ──
 const CW = Float64.(MODEL["poly2"]["cw"])
 const CL = Float64.(MODEL["poly2"]["cl"])
 const CP = Float64.(MODEL["poly2"]["cp"])
-const GATE_LO = Float64(MODEL["gate"]["soft_hu_lo"])
-const GATE_HI = Float64(MODEL["gate"]["soft_hu_hi"])
+const GATE_LO = Float64(MODEL["gate"]["soft_hu_lo"])   # decoder validity window, NOT the
+const GATE_HI = Float64(MODEL["gate"]["soft_hu_hi"])   # clinical [-190,-30] adipose gate
+const TVIT = Int(MODEL["tv"]["iters"]); const TVEPS = Float64(MODEL["tv"]["eps"])
+# λ is not a fixed number: the model card's [tv.lambda_model] evaluates it per voxel at the
+# raw decode (wlp_lambda_map, per slice below).
+
+# NO ADIPOSE GATE HERE, deliberately. Selecting voxels by their measured HU and then scoring
+# that same measurement against truth is circular: it is a clinical FAI convention, not a
+# material-decomposition evaluation. Partial volume is avoided GEOMETRICALLY, by eroding the
+# ROI off the cuff boundary. The clinical-gate analysis lives in pcat_clinical_roi.jl.
 
 function decode_poly2(hlo::Real, hhi::Real)
     b = (1.0, hlo, hhi, hlo^2, hhi^2, hlo * hhi)
@@ -41,32 +52,54 @@ function decode_poly2(hlo::Real, hhi::Real)
     (fw / s, fl / s, fp / s)
 end
 
-"""Project onto the simplex {f >= 0, sum = 1} ONCE on the result — per-sweep rectification
-would be a Jensen bias on any region mean drawn from the map (model card's `simplex_note`)."""
-function simplex_project(f)
-    g = max.(f, 0.0); s = sum(g)
-    s < 1e-12 ? (NaN, NaN, NaN) : Tuple(g ./ s)
-end
-
 # ── rebuild the label map on the recon grid ───────────────────────────────────────────
 # Materials are irrelevant for the nearest-neighbour resample; a stub Dict keeps Phantom happy.
 stub = Dict{Int, Any}(Int(l) => BS.XA.Materials.water for l in unique(D.slab))
 ph_cpu = BS.Phantom(D.slab, stub, (VOXMM / 10, VOXMM / 10, VOXMM / 10))
 m3 = BS.resample_to_recon(ph_cpu, D.geom, MATRIX; method = :nearest)
-midz = size(m3, 3) ÷ 2 + 1
-lab2 = m3[:, :, midz]
-hlo2 = Float64.(D.hu_lo[:, :, midz])
-hhi2 = Float64.(D.hu_hi[:, :, midz])
-@info "recon grid $(size(lab2)), $(round(RECON_FOV_CM*10/RECON_N,digits=3)) mm/px; " *
-      "PCAT voxels on the grid = $(count(40 .<= lab2 .< 76))"
+# Pick the valid z range FROM THE DATA, not by a fixed fraction. With 40 mm collimation the
+# FDK cone-beam truncation collapses the edge slices: measured here, myocardium ramps from
+# -229 HU at z=1 up to its true plateau by z~16, while blood stays flat throughout (so this is
+# truncation, not a z misalignment). A fixed "drop the outer 10%" kept exactly the corrupt
+# slices. Keep only slices where a bulk reference tissue reads its plateau value.
+nz = size(m3, 3)
+myo_hu = [let i = findall(x -> 15 <= Int(x) <= 18, m3[:, :, z])
+              isempty(i) ? -Inf : mean(Float64.(D.hu_lo[:, :, z])[i]) end for z in 1:nz]
+plateau = median(filter(isfinite, myo_hu[(nz÷2):nz]))
+good = [z for z in 1:nz if isfinite(myo_hu[z]) && abs(myo_hu[z] - plateau) <= 8.0]
+# Drop the first and last slice of the plateau as well: they pass the tolerance but sit at its
+# edge (myocardium 27.5 and 30.2 HU against a 32.3 HU plateau), and the reconstruction there is
+# not fully converged.
+const ZR = (minimum(good) + 1):(maximum(good) - 1)
+@info "myocardium plateau $(round(plateau, digits=1)) HU; plateau z = " *
+      "$(minimum(good)):$(maximum(good)), using $(ZR) after dropping the first and last slice"
+lab2 = m3[:, :, ZR]
+hlo2 = Float64.(D.hu_lo[:, :, ZR])
+hhi2 = Float64.(D.hu_hi[:, :, ZR])
+@info "recon grid $(size(lab2)), $(round(RECON_FOV_CM*10/RECON_N,digits=3)) mm/px in-plane, " *
+      "$(round(RECON_Z_CM*10/RECON_NZ,digits=2)) mm slices; using z $(ZR); " *
+      "PCAT voxels = $(count(40 .<= lab2 .< 76))"
 
 # ── decode the whole slice, then score ────────────────────────────────────────────────
-fw = fill(NaN, size(lab2)); fl = similar(fw); fp = similar(fw)
-for i in eachindex(lab2)
-    hl, hh = hlo2[i], hhi2[i]
-    (GATE_LO <= hl <= GATE_HI) || continue
-    f = simplex_project(decode_poly2(hl, hh))
-    fw[i], fl[i], fp[i] = f
+fw = fill(NaN, size(lab2)); fl = fill(NaN, size(lab2)); fp = fill(NaN, size(lab2))
+decode_raw(a, b) = decode_poly2(a, b)
+for z in axes(lab2, 3)
+    h70 = @view hlo2[:, :, z]; h150 = @view hhi2[:, :, z]
+    rl = zeros(size(h70)); rp = zeros(size(h70))
+    wl = zeros(size(h70)); wp = zeros(size(h70)); val = falses(size(h70))
+    for i in eachindex(h70)
+        (GATE_LO <= h70[i] <= GATE_HI) || continue
+        f0, σ = wlp_sigma_f(h70[i], h150[i], MODEL, decode_raw)
+        any(isnan, f0) && continue
+        rl[i] = f0[2]; rp[i] = f0[3]; wl[i] = 1/σ[2]^2; wp[i] = 1/σ[3]^2; val[i] = true
+    end
+    tl, tp = wlp_tv!(rl, rp, wl, wp, val; λ = wlp_lambda_map(MODEL, rl, rp, val),
+                     iters = TVIT, eps = TVEPS)
+    fwz = @view fw[:, :, z]; flz = @view fl[:, :, z]; fpz = @view fp[:, :, z]
+    for i in eachindex(h70)
+        val[i] || continue
+        fwz[i], flz[i], fpz[i] = wlp_simplex(tl[i], tp[i])   # once, after TV: every f in [0,1]
+    end
 end
 
 # ── ROI erosion ───────────────────────────────────────────────────────────────────────
@@ -92,7 +125,11 @@ cuff = falses(size(lab2))
 for (vi, _) in enumerate(VESSELS), k in 1:K
     cuff .|= (lab2 .== UInt8(fat_label(k, vi - 1)))
 end
-const CUFF_E = erode2(cuff, ERODE)
+CUFF_E_ = falses(size(cuff))
+for z in axes(cuff, 3)
+    CUFF_E_[:, :, z] = erode2(BitMatrix(cuff[:, :, z]), ERODE)
+end
+const CUFF_E = CUFF_E_
 @info "ROI erosion = $ERODE voxel(s) off the cuff boundary; " *
       "$(count(cuff)) -> $(count(CUFF_E)) PCAT pixels"
 
@@ -253,10 +290,9 @@ let ax = CM.Axis(fig[2, 1:3];
     end
     CM.axislegend(ax; position = :rt, framevisible = false, labelsize = 12)
     CM.text!(ax, 0.02, 0.04; space = :relative, align = (:left, :bottom), fontsize = 13,
-        text = "bulk reference is correct — myocardium reads $(round(mean(hlo2[findall(x->Int(x) in 15:18, lab2)]), digits=1)) HU, " *
-               "blood $(round(mean(hlo2[findall(x->Int(x) in 19:22, lab2)]), digits=1)) HU.\n" *
-               "The whole ground-truth spread across subrings is only 3.3 HU; the partial-volume " *
-               "bias here is 11–55 HU.")
+        text = "bulk reference on these slices: myocardium $(round(mean(hlo2[findall(x->Int(x) in 15:18, lab2)]), digits=1)) HU " *
+               "(true 43.8), blood $(round(mean(hlo2[findall(x->Int(x) in 19:22, lab2)]), digits=1)) HU (true 56.1).\n" *
+               "The whole ground-truth spread across the six subrings is only 3.3 HU.")
 end
 CM.Label(fig[0, :],
     "PCAT water/lipid/protein decomposition accuracy — FEBio phantom, no iodine, " *

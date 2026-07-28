@@ -28,7 +28,8 @@ using Unitful: @u_str
 include(joinpath(@__DIR__, "wlp_tv.jl"))
 
 const OUT = joinpath(@__DIR__, "pcat_ct")
-const D = deserialize(joinpath(OUT, "pcat_acq.jls"))
+const ACQ = get(ENV, "PCAT_ACQ", "pcat_acq_tissue.jls")
+const D = deserialize(joinpath(OUT, ACQ))
 const MODEL = TOML.parsefile(joinpath(@__DIR__, "wlp_model_70_150.toml"))
 const K, VOXMM = 6, 0.5
 const VESSELS = ["rca1", "rca2", "lad1", "lad2", "lad3", "lcx"]
@@ -41,8 +42,10 @@ const WALL0, LUM0 = 76, 82
 const ADIPOSE_LO, ADIPOSE_HI = -190.0, -30.0      # Antonopoulos 2017
 const CW = Float64.(MODEL["poly2"]["cw"]); const CL = Float64.(MODEL["poly2"]["cl"])
 const CP = Float64.(MODEL["poly2"]["cp"])
-const LAMBDA = Float64(MODEL["tv"]["lambda"]); const TVIT = Int(MODEL["tv"]["iters"])
-const TVEPS = Float64(MODEL["tv"]["eps"])
+const TVIT = Int(MODEL["tv"]["iters"]); const TVEPS = Float64(MODEL["tv"]["eps"])
+const GATE_LO = Float64(MODEL["gate"]["soft_hu_lo"]); const GATE_HI = Float64(MODEL["gate"]["soft_hu_hi"])
+# λ is not a fixed number: the model card's [tv.lambda_model] evaluates it per voxel at the
+# raw decode (wlp_lambda_map, per slice below).
 
 decode_raw(hlo, hhi) = begin
     b = (1.0, hlo, hhi, hlo^2, hhi^2, hlo * hhi)
@@ -87,16 +90,16 @@ for z in axes(lab,3)
     rl = zeros(size(h70)); rp = zeros(size(h70))
     wl = zeros(size(h70)); wp = zeros(size(h70)); val = falses(size(h70))
     for i in eachindex(h70)
-        (-300.0 <= h70[i] <= 250.0) || continue
+        (GATE_LO <= h70[i] <= GATE_HI) || continue
         f0, σ = wlp_sigma_f(h70[i], h150[i], MODEL, decode_raw)
         any(isnan, f0) && continue
         rl[i]=f0[2]; rp[i]=f0[3]; wl[i]=1/σ[2]^2; wp[i]=1/σ[3]^2; val[i]=true
     end
-    tl, tp = wlp_tv!(rl, rp, wl, wp, val; λ=LAMBDA, iters=TVIT, eps=TVEPS)
+    tl, tp = wlp_tv!(rl, rp, wl, wp, val; λ=wlp_lambda_map(MODEL, rl, rp, val), iters=TVIT, eps=TVEPS)
     fwz = @view FW[:,:,z]; flz = @view FL[:,:,z]; fpz = @view FP[:,:,z]
     for i in eachindex(h70)
         val[i] || continue
-        fwz[i], flz[i], fpz[i] = wlp_simplex(1-tl[i]-tp[i], tl[i], tp[i])
+        fwz[i], flz[i], fpz[i] = wlp_simplex(tl[i], tp[i])   # once, after TV: every f in [0,1]
     end
 end
 
