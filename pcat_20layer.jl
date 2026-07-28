@@ -231,6 +231,12 @@ fig = CM.Figure(size = (1620, 900))
 COLG = Dict("healthy"=>CM.RGBf(.20,.45,.80), "diseased"=>CM.RGBf(.85,.20,.18))
 ax1 = CM.Axis(fig[1,1:2]; title="radial HU profile, 20 layers — phantom vs Oxford clinical",
     titlesize=17, xlabel="shell (mm from the coronary)", ylabel="HU at 70 keV", xticks=1:2:20)
+# Shells below SHELL_MIN are still PLOTTED — nothing is dropped silently — but they do not enter
+# the accuracy statistics, so the band is shaded to say which part of the curve is not scored.
+SHELL_MIN > 1 && CM.vspan!(ax1, 0.5, SHELL_MIN - 0.5; color = (:gray60, 0.16))
+SHELL_MIN > 1 && CM.text!(ax1, SHELL_MIN - 0.6, 1.0; space = :relative, align = (:right, :top),
+    text = "not scored\n(shell < $SHELL_MIN)", fontsize = 9, color = :gray45,
+    offset = (0, -4))
 for g in ("healthy","diseased")
     rr = [r for r in rows if r.group==g]; isempty(rr) && continue
     sh = [Float64(r.shell) for r in rr]
