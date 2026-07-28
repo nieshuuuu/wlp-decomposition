@@ -1,11 +1,14 @@
 # Multi-slice montage: CT, ground-truth lipid, decoded lipid, and the difference, across z.
 #
 # ORIENTATION. Measured on the recon grid, not assumed: sternum (label 3) sits at mean j = 29.5
-# and the vertebra (label 9) at j = 454.2, so LOW j is anterior. CairoMakie's heatmap puts j on
-# the vertical with the origin bottom-left, which would render anterior-DOWN. ImageJ shows these
-# raws anterior-UP, so each panel is transposed and flipped to match the viewer being compared
-# against: `permutedims` puts j on the vertical, then `reverse(dims=1)` puts low j (anterior) on
-# top. Patient left ends up on the viewer's right, i.e. standard radiological axial.
+# and the vertebra (label 9) at j = 454.2, so LOW j is anterior. CairoMakie's heatmap draws M[x,y]
+# with the FIRST index horizontal and the SECOND vertical, origin bottom-left, so the raw array
+# renders anterior-DOWN. ImageJ shows these raws anterior-UP, so the second index is reversed.
+#
+# Do NOT use permutedims for this: it swaps the axes and ROTATES the slice 90 degrees. Verified
+# by tracking the landmarks through each candidate transform — permutedims put sternum/vertebra
+# at horizontal 483.5/58.8 (i.e. left-right), while reverse(dims=2) puts them at vertical
+# 483.5/58.8, which is the intended anterior-up.
 import BasisSimulator as BS
 import CairoMakie as CM
 import TOML
@@ -13,6 +16,7 @@ using Statistics: mean, median
 using Serialization: deserialize
 using Printf: @printf
 include(joinpath(@__DIR__, "wlp_tv.jl"))
+include(joinpath(@__DIR__, "pcat_orient.jl"))
 
 const OUT = joinpath(@__DIR__, "pcat_ct")
 const D = deserialize(joinpath(OUT, get(ENV, "PCAT_ACQ", "pcat_acq_shell.jls")))
@@ -33,19 +37,19 @@ decode_raw(a, b) = begin
     abs(s) < 1e-12 ? (NaN, NaN, NaN) : (f[1]/s, f[2]/s, f[3]/s)
 end
 
-# anterior-up, patient-left on the right — matches how ImageJ shows these raws
-disp(A) = reverse(permutedims(A); dims = 1)
-
 stub = Dict{Int,Any}(Int(l)=>BS.XA.Materials.water for l in unique(D.slab))
-m3 = BS.resample_to_recon(BS.Phantom(D.slab, stub, (VOXMM/10,VOXMM/10,VOXMM/10)),
-                          D.geom, (RECON_N,RECON_N,RECON_NZ); method=:nearest)
+m3 = to_clinical_z(BS.resample_to_recon(BS.Phantom(D.slab, stub, (VOXMM/10,VOXMM/10,VOXMM/10)),
+                                        D.geom, (RECON_N,RECON_N,RECON_NZ); method=:nearest))
+const HU70V = to_clinical_z(Float64.(D.hu_lo))     # flipped with the label map, in one place
+const HU150V = to_clinical_z(Float64.(D.hu_hi))
 nz = size(m3,3)
-myo = [let i=findall(x->15<=Int(x)<=18, m3[:,:,z]); isempty(i) ? -Inf : mean(Float64.(D.hu_lo[:,:,z])[i]) end for z in 1:nz]
-plv = median(filter(isfinite, myo[(nz÷2):nz]))
+myo = [let i=findall(x->15<=Int(x)<=18, m3[:,:,z]); isempty(i) ? -Inf : mean(HU70V[:,:,z][i]) end for z in 1:nz]
+plv = let v = sort(filter(isfinite, myo)); median(v[(length(v)÷2+1):end]) end
 gd = [z for z in 1:nz if isfinite(myo[z]) && abs(myo[z]-plv)<=8.0]
 ZR = (minimum(gd)+1):(maximum(gd)-1)
+# The volume is already in clinical z (slice 1 = most cranial), so ascending z IS cranial->caudal.
 ZS = round.(Int, range(first(ZR), last(ZR), NSLICE))
-@info "valid z $ZR; showing slices $ZS"
+@info "valid z $ZR (clinical z: 1 = cranial); showing slices $ZS"
 
 # crop once, on the union of adipose across the shown slices
 isfat(l) = (40 <= l < LUM0) || (88 <= l <= 127)
@@ -60,7 +64,7 @@ crop(A) = A[r1:r2, c1:c2]
 fig = CM.Figure(size = (1180, 210 * NSLICE + 120))
 for (row, z) in enumerate(ZS)
     lab = m3[:,:,z]
-    h70 = Float64.(D.hu_lo[:,:,z]); h150 = Float64.(D.hu_hi[:,:,z])
+    h70 = HU70V[:,:,z]; h150 = HU150V[:,:,z]
     gtl = fill(NaN, size(lab))
     for i in eachindex(lab)
         l = Int(lab[i]); haskey(D.gt, l) && (gtl[i] = D.gt[l][2])
@@ -91,7 +95,9 @@ for (row, z) in enumerate(ZS)
     for (col, (A, cmap, rng, ttl)) in enumerate(panels)
         ax = CM.Axis(fig[row, col]; aspect = CM.DataAspect(),
             title = row == 1 ? ttl : "", titlesize = 15,
-            ylabel = col == 1 ? "z = $z" : "", ylabelsize = 13)
+            ylabel = col == 1 ? (row == 1 ? "z = $z  (cranial)" :
+                                 row == NSLICE ? "z = $z  (caudal)" : "z = $z") : "",
+            ylabelsize = 13)
         col > 1 && CM.heatmap!(ax, disp(crop(h70)); colormap = :grays,
                                colorrange = (-200.0, 150.0))
         CM.heatmap!(ax, disp(A); colormap = cmap, colorrange = rng,

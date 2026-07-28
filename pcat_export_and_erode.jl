@@ -15,17 +15,19 @@ using Serialization: deserialize
 using Unitful: @u_str
 
 const OUT = joinpath(@__DIR__, "pcat_ct")
-const D = deserialize(joinpath(OUT, "pcat_acq.jls"))
+const ACQ = get(ENV, "PCAT_ACQ", "pcat_acq_tissue.jls")
+const D = deserialize(joinpath(OUT, ACQ))
 const K, VOXMM = 6, 0.5
 const VESSELS = ["rca1", "rca2", "lad1", "lad2", "lad3", "lcx"]
 fat_label(k, i) = 40 + 6 * (K - k) + i
-const RECON_N, RECON_FOV_CM, RECON_NZ = 512, 18.0, 3
+const RECON_N, RECON_FOV_CM, RECON_NZ = 512, 18.0, 40
 const PX_MM = RECON_FOV_CM * 10 / RECON_N
 
 # ── 1. export ─────────────────────────────────────────────────────────────────────────
 stub = Dict{Int, Any}(Int(l) => BS.XA.Materials.water for l in unique(D.slab))
 ph_cpu = BS.Phantom(D.slab, stub, (VOXMM / 10, VOXMM / 10, VOXMM / 10))
 m3 = BS.resample_to_recon(ph_cpu, D.geom, (RECON_N, RECON_N, RECON_NZ); method = :nearest)
+const SLICE_MM = 4.0 * 10 / RECON_NZ
 
 for (nm, arr) in (("vmi070keV", Float32.(D.hu_lo)), ("vmi150keV", Float32.(D.hu_hi)))
     p = joinpath(OUT, "pcat_$(nm)_$(RECON_N)x$(RECON_N)x$(RECON_NZ)_float32.raw")
@@ -38,7 +40,7 @@ let p = joinpath(OUT, "pcat_phantom_slab_640x640x$(size(D.slab,3))_uint8.raw")
     write(p, D.slab); println("wrote $p  (0.5mm phantom slab, z $(D.z0)..$(D.z0+size(D.slab,3)-1))")
 end
 println("recon grid $(RECON_N)^2 @ $(RECON_FOV_CM) cm FOV = $(round(PX_MM, digits=4)) mm/px, " *
-        "$(RECON_NZ) slices\n")
+        "$(RECON_NZ) slices of $(SLICE_MM) mm\n")
 
 # ── 2. erosion experiment ─────────────────────────────────────────────────────────────
 midz = size(m3, 3) ÷ 2 + 1

@@ -78,7 +78,7 @@ m3 = BS.resample_to_recon(BS.Phantom(D.slab, stub, (VOXMM/10,VOXMM/10,VOXMM/10))
                           D.geom, (RECON_N,RECON_N,RECON_NZ); method=:nearest)
 nz = size(m3,3)
 myo = [let i=findall(x->15<=Int(x)<=18, m3[:,:,z]); isempty(i) ? -Inf : mean(Float64.(D.hu_lo[:,:,z])[i]) end for z in 1:nz]
-pl = median(filter(isfinite, myo[(nz÷2):nz]))
+pl = let v = sort(filter(isfinite, myo)); median(v[(length(v)÷2+1):end]) end
 ZR = let g=[z for z in 1:nz if isfinite(myo[z]) && abs(myo[z]-pl)<=8.0]; minimum(g):maximum(g) end
 lab = m3[:,:,ZR]; H70 = Float64.(D.hu_lo[:,:,ZR]); H150 = Float64.(D.hu_hi[:,:,ZR])
 @info "valid z $ZR, $(round(PX_MM,digits=4)) mm/px"

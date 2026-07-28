@@ -13,7 +13,7 @@ using Printf: @printf
 include(joinpath(@__DIR__, "wlp_tv.jl"))
 
 const OUT = joinpath(@__DIR__, "pcat_ct")
-const ACQ = get(ENV, "PCAT_ACQ", "pcat_acq_tissue.jls")
+const ACQ = get(ENV, "PCAT_ACQ", "pcat_acq_shell.jls")
 const D = deserialize(joinpath(OUT, ACQ))
 const MODEL = TOML.parsefile(joinpath(@__DIR__, "wlp_model_70_150.toml"))
 const K, VOXMM = 6, 0.5
@@ -45,7 +45,7 @@ m3 = BS.resample_to_recon(BS.Phantom(D.slab, stub, (VOXMM/10, VOXMM/10, VOXMM/10
 nz = size(m3, 3)
 myo = [let i = findall(x -> 15 <= Int(x) <= 18, m3[:, :, z])
            isempty(i) ? -Inf : mean(Float64.(D.hu_lo[:, :, z])[i]) end for z in 1:nz]
-plate = median(filter(isfinite, myo[(nz÷2):nz]))
+plate = let v = sort(filter(isfinite, myo)); median(v[(length(v)÷2+1):end]) end
 good = [z for z in 1:nz if isfinite(myo[z]) && abs(myo[z] - plate) <= 8.0]
 ZR = minimum(good):maximum(good)
 
@@ -85,12 +85,15 @@ for i in eachindex(lab)
     dew[i], del[i], dep[i] = wlp_simplex(tl[i], tp[i])   # once, after TV: every f in [0,1]
 end
 
-pcat = [40 <= Int(l) < LUM0 for l in lab]
+pcat = [(40 <= Int(l) < LUM0) || (88 <= Int(l) <= 127) for l in lab]   # grown PCAT + distance shells
 ys, xs = (getindex.(findall(pcat), 1), getindex.(findall(pcat), 2))
 pad = 24
 r1, r2 = max(minimum(ys) - pad, 1), min(maximum(ys) + pad, RECON_N)
 c1, c2 = max(minimum(xs) - pad, 1), min(maximum(xs) + pad, RECON_N)
 crop(A) = A[r1:r2, c1:c2]
+# anterior-up: heatmap(M) draws M[x,y] with the second index vertical and low j is anterior
+# (sternum j=29.5, vertebra j=454.2), so reverse the second index. permutedims would rotate 90 deg.
+disp(A) = reverse(A; dims = 2)
 @info "crop $(r2-r1+1) x $(c2-c1+1) px = $(round((r2-r1+1)*PX_MM, digits=1)) x $(round((c2-c1+1)*PX_MM, digits=1)) mm"
 
 # ── figure ────────────────────────────────────────────────────────────────────────────
@@ -106,13 +109,13 @@ for (col, (s, name, GT, DE)) in enumerate(MATS)
     # row 1 — ground truth (defined only where the phantom has a W/L/P material, i.e. the PCAT)
     ax1 = CM.Axis(fig[1, col]; aspect = CM.DataAspect(),
         title = "ground truth $name\nrange ($lo, $hi)", titlesize = 15)
-    CM.heatmap!(ax1, crop(gtw) .* 0 .+ 0.0; colormap = [CM.RGBf(.15,.15,.15)], colorrange = (0,1))
-    CM.heatmap!(ax1, crop(GT); colormap = :jet, colorrange = (lo, hi), nan_color = :transparent)
+    CM.heatmap!(ax1, disp(crop(gtw) .* 0 .+ 0.0); colormap = [CM.RGBf(.15,.15,.15)], colorrange = (0,1))
+    CM.heatmap!(ax1, disp(crop(GT)); colormap = :jet, colorrange = (lo, hi), nan_color = :transparent)
     CM.hidedecorations!(ax1)
     # row 2 — decoded, same crop and same scale
     ax2 = CM.Axis(fig[2, col]; aspect = CM.DataAspect(),
         title = "decoded $name (70/150 keV)", titlesize = 15)
-    hm = CM.heatmap!(ax2, crop(DE); colormap = :jet, colorrange = (lo, hi), nan_color = :black)
+    hm = CM.heatmap!(ax2, disp(crop(DE)); colormap = :jet, colorrange = (lo, hi), nan_color = :black)
     CM.hidedecorations!(ax2)
     CM.Colorbar(fig[4, col], hm; vertical = false, height = 11, label = "volume fraction")
     # row 3 — decoded minus truth, PCAT only
@@ -123,8 +126,8 @@ for (col, (s, name, GT, DE)) in enumerate(MATS)
     ax3 = CM.Axis(fig[3, col]; aspect = CM.DataAspect(),
         title = "decoded − truth, PCAT only\nmean $(round(100*mean(filter(!isnan, dif)), digits=1)) %",
         titlesize = 15)
-    CM.heatmap!(ax3, crop(gtw) .* 0 .+ 0.0; colormap = [CM.RGBf(.15,.15,.15)], colorrange = (0,1))
-    hd = CM.heatmap!(ax3, crop(dif); colormap = :balance, colorrange = (-0.4, 0.4),
+    CM.heatmap!(ax3, disp(crop(gtw) .* 0 .+ 0.0); colormap = [CM.RGBf(.15,.15,.15)], colorrange = (0,1))
+    hd = CM.heatmap!(ax3, disp(crop(dif)); colormap = :balance, colorrange = (-0.4, 0.4),
                      nan_color = :transparent)
     CM.hidedecorations!(ax3)
     col == 3 && CM.Colorbar(fig[3, 4], hd; label = "decoded − truth", width = 12)

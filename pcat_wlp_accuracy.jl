@@ -65,7 +65,7 @@ m3 = BS.resample_to_recon(ph_cpu, D.geom, MATRIX; method = :nearest)
 nz = size(m3, 3)
 myo_hu = [let i = findall(x -> 15 <= Int(x) <= 18, m3[:, :, z])
               isempty(i) ? -Inf : mean(Float64.(D.hu_lo[:, :, z])[i]) end for z in 1:nz]
-plateau = median(filter(isfinite, myo_hu[(nz÷2):nz]))
+plateau = let v = sort(filter(isfinite, myo_hu)); median(v[(length(v)÷2+1):end]) end
 good = [z for z in 1:nz if isfinite(myo_hu[z]) && abs(myo_hu[z] - plateau) <= 8.0]
 # Drop the first and last slice of the plateau as well: they pass the tolerance but sit at its
 # edge (myocardium 27.5 and 30.2 HU against a 32.3 HU plateau), and the reconstruction there is

@@ -69,7 +69,7 @@ m3 = BS.resample_to_recon(BS.Phantom(D.slab, stub, (VOXMM/10,VOXMM/10,VOXMM/10))
                           D.geom, (RECON_N,RECON_N,RECON_NZ); method=:nearest)
 nz = size(m3,3)
 myo = [let i=findall(x->15<=Int(x)<=18, m3[:,:,z]); isempty(i) ? -Inf : mean(Float64.(D.hu_lo[:,:,z])[i]) end for z in 1:nz]
-pl = median(filter(isfinite, myo[(nz÷2):nz]))
+pl = let v = sort(filter(isfinite, myo)); median(v[(length(v)÷2+1):end]) end
 gd = [z for z in 1:nz if isfinite(myo[z]) && abs(myo[z]-pl)<=8.0]
 ZR = (minimum(gd)+1):(maximum(gd)-1)
 lab = m3[:,:,ZR]; H70 = Float64.(D.hu_lo[:,:,ZR]); H150 = Float64.(D.hu_hi[:,:,ZR])
@@ -87,11 +87,11 @@ for z in axes(lab,3)
         any(isnan, f0) && continue
         rl[i]=f0[2]; rp[i]=f0[3]; wl[i]=1/σ[2]^2; wp[i]=1/σ[3]^2; val[i]=true
     end
-    tl, tp = wlp_tv!(rl, rp, wl, wp, val; λ=LAMBDA, iters=TVIT, eps=TVEPS)
+    tl, tp = wlp_tv!(rl, rp, wl, wp, val; λ=wlp_lambda_map(MODEL, rl, rp, val), iters=TVIT, eps=TVEPS)
     fwz = @view FW[:,:,z]; flz = @view FL[:,:,z]; fpz = @view FP[:,:,z]
     for i in eachindex(h70)
         val[i] || continue
-        fwz[i], flz[i], fpz[i] = wlp_simplex(1-tl[i]-tp[i], tl[i], tp[i])
+        fwz[i], flz[i], fpz[i] = wlp_simplex(tl[i], tp[i])
     end
 end
 

@@ -15,7 +15,8 @@ using Unitful: @u_str
 using Printf: @printf
 
 const OUT = joinpath(@__DIR__, "pcat_ct")
-const D = deserialize(joinpath(OUT, "pcat_acq.jls"))
+const ACQ = get(ENV, "PCAT_ACQ", "pcat_acq_tissue.jls")
+const D = deserialize(joinpath(OUT, ACQ))
 const K, VOXMM = 6, 0.5
 const VESSELS = ["rca1", "rca2", "lad1", "lad2", "lad3", "lcx"]
 const VESSEL_GROUP = Dict("rca1" => "healthy", "lcx" => "healthy", "lad1" => "healthy",
@@ -65,7 +66,7 @@ m3 = BS.resample_to_recon(BS.Phantom(D.slab, stub, (VOXMM/10, VOXMM/10, VOXMM/10
 nz = size(m3, 3)
 myo_hu = [let i = findall(x -> 15 <= Int(x) <= 18, m3[:, :, z])
               isempty(i) ? -Inf : mean(Float64.(D.hu_lo[:, :, z])[i]) end for z in 1:nz]
-plateau = median(filter(isfinite, myo_hu[(nz÷2):nz]))
+plateau = let v = sort(filter(isfinite, myo_hu)); median(v[(length(v)÷2+1):end]) end
 good = [z for z in 1:nz if isfinite(myo_hu[z]) && abs(myo_hu[z] - plateau) <= 8.0]
 ZR = minimum(good):maximum(good)
 lab = m3[:, :, ZR]
@@ -93,10 +94,16 @@ centers = [(EDGES[i] + EDGES[i+1]) / 2 for i in 1:nb]
 
 lut70 = truth_lut(70.0); lut150 = truth_lut(150.0)
 
+# The clinical profile is ADIPOSE-GATED: Antonopoulos 2017 averages only voxels in
+# [-190, -30] HU. Voxels pulled above -30 by the vessel wall are excluded, which is an implicit
+# partial-volume rejection. Both the gated and ungated means are accumulated here so the size of
+# that effect is visible rather than assumed.
+const ADIPOSE_LO, ADIPOSE_HI = -190.0, -30.0
 profiles = Dict{String, Any}()
 for (vi, v) in enumerate(VESSELS)
     sm = zeros(nb, 4); cnt = zeros(Int, nb)          # meas70, meas150, true70, true150
     sq = zeros(nb)
+    smg = zeros(nb, 2); cntg = zeros(Int, nb)        # adipose-gated meas70, meas150
     for z in axes(lab, 3)
         L = @view lab[:, :, z]
         h70z = @view H70[:, :, z]; h150z = @view H150[:, :, z]
@@ -115,24 +122,32 @@ for (vi, v) in enumerate(VESSELS)
             sm[b, 1] += h70z[idx];  sm[b, 2] += h150z[idx]
             sm[b, 3] += lut70[l];   sm[b, 4] += lut150[l]
             sq[b] += h70z[idx]^2
+            if ADIPOSE_LO <= h70z[idx] <= ADIPOSE_HI
+                cntg[b] += 1; smg[b, 1] += h70z[idx]; smg[b, 2] += h150z[idx]
+            end
         end
     end
     ok = cnt .>= 30
-    profiles[v] = (r = centers[ok], n = cnt[ok],
+    g70 = [cntg[i] >= 20 ? smg[i,1]/cntg[i] : NaN for i in eachindex(cnt)]
+    g150 = [cntg[i] >= 20 ? smg[i,2]/cntg[i] : NaN for i in eachindex(cnt)]
+    profiles[v] = (r = centers[ok], n = cnt[ok], ng = cntg[ok],
                    m70 = sm[ok, 1] ./ cnt[ok], m150 = sm[ok, 2] ./ cnt[ok],
+                   g70 = g70[ok], g150 = g150[ok],
                    t70 = sm[ok, 3] ./ cnt[ok], t150 = sm[ok, 4] ./ cnt[ok],
                    sd70 = sqrt.(max.(sq[ok] ./ cnt[ok] .- (sm[ok, 1] ./ cnt[ok]) .^ 2, 0.0)))
 end
 
-println("\nHU vs radial distance (70 keV), measured / truth")
-@printf("%6s", "r_mm"); for v in VESSELS; @printf("%18s", v); end; println()
+println("\nHU vs radial distance (70 keV):  ungated / ADIPOSE-GATED / % kept")
+@printf("%6s", "r_mm"); for v in VESSELS; @printf("%22s", v); end; println()
 for (i, r) in enumerate(centers)
     (-1.0 <= r <= 7.0) || continue
     abs(r - round(r * 2) / 2) < BINW / 2 || continue
     @printf("%6.2f", r)
     for v in VESSELS
         p = profiles[v]; j = findfirst(x -> abs(x - r) < BINW / 2, p.r)
-        j === nothing ? @printf("%18s", "-") : @printf("%9.1f /%7.1f", p.m70[j], p.t70[j])
+        j === nothing ? @printf("%22s", "-") :
+            @printf("%7.1f /%7.1f /%6.0f%%", p.m70[j], isnan(p.g70[j]) ? NaN : p.g70[j],
+                    100*p.ng[j]/p.n[j])
     end
     println()
 end
@@ -144,7 +159,7 @@ COL = Dict("rca1" => CM.RGBf(.85, .20, .18), "rca2" => CM.RGBf(.55, .35, .30),
 fig = CM.Figure(size = (1560, 760))
 for (col, (E, mk, tk, lbl)) in enumerate(((70, :m70, :t70, "70 keV"), (150, :m150, :t150, "150 keV")))
     ax = CM.Axis(fig[1, col];
-        title = "$lbl — measured (solid) vs phantom truth (dashed)", titlesize = 18,
+        title = "$lbl — adipose-gated (bold) vs ungated (faint) vs truth (dashed)", titlesize = 18,
         xlabel = "signed radial distance from the coronary wall (mm)",
         ylabel = col == 1 ? "HU" : "", xticks = -2:1:8)
     CM.vlines!(ax, 0.0; color = :gray50, linestyle = :dot)
@@ -152,11 +167,26 @@ for (col, (E, mk, tk, lbl)) in enumerate(((70, :m70, :t70, "70 keV"), (150, :m15
     for v in VESSELS
         haskey(profiles, v) || continue
         p = profiles[v]; isempty(p.r) && continue
-        CM.lines!(ax, p.r, getproperty(p, mk); color = COL[v], linewidth = 2.4, label = v)
-        CM.lines!(ax, p.r, getproperty(p, tk); color = (COL[v], 0.55), linewidth = 1.6,
+        CM.lines!(ax, p.r, getproperty(p, mk); color = (COL[v], 0.35), linewidth = 1.6, label = "\$v ungated")
+        gk = mk === :m70 ? :g70 : :g150
+        CM.lines!(ax, p.r, getproperty(p, gk); color = COL[v], linewidth = 2.6, label = "\$v gated")
+        CM.lines!(ax, p.r, getproperty(p, tk); color = (COL[v], 0.5), linewidth = 1.4,
                   linestyle = :dash)
     end
-    col == 2 && CM.axislegend(ax; position = :rb, framevisible = false, labelsize = 12)
+    # the Oxford CLINICAL curve — the target the phantom was designed to reproduce
+    if col == 1
+        oxd = Float64[]; oxh = Float64[]
+        for ln in eachline("/Volumes/Molloilab/Shu Nie/water-lipid-protein/oxford_wlp_composition.csv")
+            (startswith(ln, "#") || startswith(ln, "group")) && continue
+            f = split(strip(ln), ',')
+            f[1] == "healthy" || continue
+            push!(oxd, parse(Float64, f[2])); push!(oxh, parse(Float64, f[3]))
+        end
+        o = sortperm(oxd)
+        CM.lines!(ax, oxd[o], oxh[o]; color = :black, linewidth = 3.5,
+                  linestyle = (:dot, :dense), label = "Oxford CLINICAL (healthy)")
+    end
+    CM.axislegend(ax; position = :rb, framevisible = false, labelsize = 11)
 end
 CM.Label(fig[0, :],
     "PCAT radial HU profile — the gap between solid and dashed is the reconstruction's " *

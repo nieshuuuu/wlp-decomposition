@@ -14,3 +14,10 @@ LocalPreferences.toml
 # scratch
 /scratch/
 *.jls
+
+# Simulated CT output — hundreds of MB and fully regenerable.
+#   *.jls  acquisition caches from pcat_ct_sim.jl (~150 MB each, ~17 min to rebuild)
+#   *.raw  reconstructed volumes and phantom rasters, re-exported by pcat_export_clinical.jl
+# The small derived artefacts in pcat_ct/ (CSV tables, figures) ARE tracked — they are the
+# results, and they cost nothing to carry.
+pcat_ct/*.raw
