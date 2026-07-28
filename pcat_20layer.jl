@@ -54,10 +54,14 @@ const ADIPOSE_LO, ADIPOSE_HI = -190.0, -30.0
 # NMIN_STAT = 500. The sparse outer diseased shells that do survive (n = 73-376) flip sign to
 #   +3.2 .. +6.1 pp. That is the standard error of the ROI mean, not a bias. Regions below the floor
 #   are tabulated with their standard error and excluded from the statistics.
-const ERODE      = length(ARGS) >= 1 ? parse(Int, ARGS[1]) : 8
-const SHELL_MIN  = parse(Int, get(ENV, "PCAT_SHELL_MIN", "3"))
-const NMIN_STAT  = parse(Int, get(ENV, "PCAT_NMIN_STAT", "500"))
+const ERODE_DEF, SHELL_MIN_DEF, NMIN_STAT_DEF = 8, 3, 500
+const ERODE      = length(ARGS) >= 1 ? parse(Int, ARGS[1]) : ERODE_DEF
+const SHELL_MIN  = parse(Int, get(ENV, "PCAT_SHELL_MIN", string(SHELL_MIN_DEF)))
+const NMIN_STAT  = parse(Int, get(ENV, "PCAT_NMIN_STAT", string(NMIN_STAT_DEF)))
 const NMIN_TABLE = 30                      # below this a region is not even reported
+# Non-default settings write to their own filenames, so a sweep never clobbers the canonical run.
+const TAG = (ERODE, SHELL_MIN, NMIN_STAT) == (ERODE_DEF, SHELL_MIN_DEF, NMIN_STAT_DEF) ? "" :
+            "_e$(ERODE)_s$(SHELL_MIN)_n$(NMIN_STAT)"
 const CW = Float64.(MODEL["poly2"]["cw"]); const CL = Float64.(MODEL["poly2"]["cl"])
 const CP = Float64.(MODEL["poly2"]["cp"])
 const GLO = Float64(MODEL["gate"]["soft_hu_lo"]); const GHI = Float64(MODEL["gate"]["soft_hu_hi"])
@@ -231,21 +235,22 @@ for g in ("healthy","diseased")
     rr = [r for r in rows if r.group==g]; isempty(rr) && continue
     sh = [Float64(r.shell) for r in rr]
     CM.lines!(ax1, sh, [r.truthHU for r in rr]; color=COLG[g], linewidth=2, linestyle=:dash)
-    CM.lines!(ax1, sh, [r.hu_pv for r in rr]; color=(COLG[g],0.45), linewidth=2)
     CM.scatterlines!(ax1, sh, [r.hu_gate for r in rr]; color=COLG[g], linewidth=2.6, markersize=8)
 end
+# This panel is the CLINICAL FAI construct, so only the HU-gated curve belongs on it. The MMD ROI's
+# own mean HU is not an MMD deliverable (its deliverables are the fractions below) and plotting it
+# here mixes the two lines the analysis deliberately keeps apart; the number is still printed.
+#
 # Two encodings are in play — colour says WHICH GROUP, line style says WHICH QUANTITY — so the
 # legend is split the same way. A single flat list interleaves the two and reads as noise.
 CM.Legend(fig[1,1:2],
     [[CM.LineElement(color=COLG["healthy"],  linewidth=3),
       CM.LineElement(color=COLG["diseased"], linewidth=3)],
      [CM.LineElement(color=:gray25, linewidth=2, linestyle=:dash),
-      CM.LineElement(color=(:gray25,0.45), linewidth=2),
       [CM.LineElement(color=:gray25, linewidth=2.6),
        CM.MarkerElement(color=:gray25, marker=:circle, markersize=8)]]],
     [["healthy", "diseased"],
      ["truth — the shell's nominal composition",
-      "measured — MMD ROI (erode $ERODE px, no HU gate)",
       "measured — clinical FAI ([$(Int(ADIPOSE_LO)), $(Int(ADIPOSE_HI))] HU gate)"]],
     ["colour = vessel group", "line = quantity"];
     tellwidth=false, tellheight=false, halign=:right, valign=:top, margin=(8,8,8,8),
@@ -306,13 +311,13 @@ CM.Label(fig[0,:], "PCAT 20-layer analysis — MMD, geometric partial-volume avo
     "(erode $ERODE px = $(round(ERODE*PX_MM, digits=2)) mm); statistics over shells >= $SHELL_MIN " *
     "with n_PV >= $NMIN_STAT; clinical FAI scored with the [$(Int(ADIPOSE_LO)), $(Int(ADIPOSE_HI))] HU gate";
     fontsize=16, font=:bold)
-CM.save(joinpath(OUT,"pcat_20layer.png"), fig; px_per_unit=2)
-println("\nfigure -> ", joinpath(OUT,"pcat_20layer.png"))
+CM.save(joinpath(OUT,"pcat_20layer$(TAG).png"), fig; px_per_unit=2)
+println("\nfigure -> ", joinpath(OUT,"pcat_20layer$(TAG).png"))
 
-open(joinpath(OUT,"pcat_20layer.csv"),"w") do io
+open(joinpath(OUT,"pcat_20layer$(TAG).csv"),"w") do io
     println(io,"group,shell_mm,n_geom,n_pv,n_gate,truth_HU,HU_pv,HU_gate,gt_water,gt_lipid,gt_protein,ms_water,ms_lipid,ms_protein,sem_water,sem_lipid,sem_protein,sd_lipid,in_statistics")
     for r in rows
         println(io,"$(r.group),$(r.shell),$(r.n_geom),$(r.n_pv),$(r.n_gate),$(r.truthHU),$(r.hu_pv),$(r.hu_gate),$(r.gt_w),$(r.gt_l),$(r.gt_p),$(r.m_w),$(r.m_l),$(r.m_p),$(r.sem_w),$(r.sem_l),$(r.sem_p),$(r.sd_l),$(r.instat)")
     end
 end
-println("csv -> ", joinpath(OUT,"pcat_20layer.csv"))
+println("csv -> ", joinpath(OUT,"pcat_20layer$(TAG).csv"))
