@@ -955,7 +955,7 @@ begin
 
 **λ(f̂) is fitted and available, but the SHIPPED default is the global λ.** Measured per (scan, insert) on the calibration thoraxes — $(length(LAMS_FIT))-point log grid over λ ∈ [$(round(LAMS_FIT[1],digits=2)), $(round(Int,LAMS_FIT[end]))] + parabolic refinement, one TV per scan per λ shared by all inserts, **censored optima dropped** ($(_nsat)/$(length(lam_y)) never turned back up inside the bracket) — the surviving optima regress as **log₁₀λ\\* = $(round(LM_C[1],digits=2)) + $(round(LM_C[2],digits=2))·f\\_l + $(round(LM_C[3],digits=2))·f\\_p** (n=$(length(_ylam)), R²=$(round(r2_lam,digits=2))). It beats the global λ on calibration per-voxel RMSE (**$(round(_rmse_model,digits=4)) vs $(round(_rmse_gt,digits=4)), ×$(round(_model_cost,digits=3))**) and loses on the held-out sector (×$(round(_sect_ratio,digits=2))). Pass `lambda=:model` to `deliver`/`score_rois` to use it; §6.5's diagnostic (fig 12) is why it is not the default.
 
-**Why λ\\* moves with composition — and it is NOT the noise channel.** The obvious explanation is wrong, and measuring it is what shows that: σ\\_f varies only $(round(100*(maximum(_sfl_diag)/minimum(_sfl_diag)-1),digits=1))% across the whole composition range (σ\\_f(f\\_l) ∈ [$(round(minimum(_sfl_diag),digits=4)), $(round(maximum(_sfl_diag),digits=4))]) while λ\\* spans a factor of $(round(10^(maximum(_ylam)-minimum(_ylam)),digits=1)). Regressed alone, log σ\\_f explains R² = $(round(_r2_sig,digits=2)) of log₁₀λ\\*; put it beside the fractions and it drops to t = $(round(_t_sig,digits=2)). σ\\_f is the one channel that is a **pure per-voxel composition quantity**, geometry-free by construction — and it is flat here. So the dependence lives in the *bias* channel: the contrast TV imports across a boundary. That is a relation between a voxel and its neighbours, which is exactly what "geometry" means.
+**Whatever moves λ\\*, it is not the noise channel.** σ\\_f is the obvious candidate — it is what the TV weight balances against, and it is the one channel that is a **pure per-voxel composition quantity**, geometry-free by construction. Measured, it is flat: σ\\_f(f\\_l) ∈ [$(round(minimum(_sfl_diag),digits=4)), $(round(maximum(_sfl_diag),digits=4))], a $(round(100*(maximum(_sfl_diag)/minimum(_sfl_diag)-1),digits=1))% spread across the entire composition range, while λ\\* spans a factor of $(round(10^(maximum(_ylam)-minimum(_ylam)),digits=1)). Regressed alone, log σ\\_f explains R² = $(round(_r2_sig,digits=2)) of log₁₀λ\\*; beside the fractions it is t = $(round(_t_sig,digits=2)). So the residual dependence, such as it is, lives in the *bias* channel — the contrast TV imports across a boundary, which is a relation between a voxel and its neighbours, i.e. geometry. §8 carries the full verdict; the short version is that the composition tilt is marginal (f\\_l t = $(round(_tstat[2],digits=1)), R² = $(round(r2_lam,digits=2))) and the objective is nearly flat in λ (fig 12A), so λ\\* is weakly determined before any model is fitted to it.
 
 **λ_GT is also uncomputable on a patient** — it needs truth. So **SURE** (Stein 1981; MC divergence per Ramani, Blu & Unser 2008) is carried alongside as the GT-free **reference**: it infers risk from the noise model alone (σ ladder, decode gradient, image), all of which a real scan has. It does **not** ship. Its job here is to say what a GT-free λ would have cost, and the phantom is the only place that can be measured.
 
@@ -1275,7 +1275,7 @@ begin
                     # THE CAVEAT, carried with the coefficients so a consumer cannot miss it:
                     "heldout_shape_rmse_vs_global"=>_sect_ratio,
                     "sigma_f_r2"=>_r2_sig, "sigma_f_t_given_fractions"=>_t_sig,
-                    "verdict"=>"NOT the default. lambda* does vary with composition (t(fl)=$(round(_tstat[2],digits=1))), and it is NOT the noise channel: sigma_f varies only $(round(100*(maximum(_sfl_diag)/minimum(_sfl_diag)-1),digits=1))% across the composition range and explains R2=$(round(_r2_sig,digits=2)) alone / t=$(round(_t_sig,digits=2)) beside the fractions. The dependence is in the BIAS channel (contrast across the boundary), which is not separable from geometry here: on the discs corr(f_l,|dHU to the surrounding ring|) is high, so 'material' and 'contrast' fit equally well. Consequence: the surface wins x$(round(_pv[1].model/_pv[1].global_,digits=2)) per-voxel RMSE on the calibration geometry and LOSES x$(round(_sect_ratio,digits=2)) on the held-out sector — worse at the very quantity it was optimised for — so the scalar lambda ships. Set default=true only with evidence from YOUR geometry.",
+                    "verdict"=>"NOT the default; the scalar lambda ships. The composition tilt is MARGINAL once censored optima are dropped: t(fl)=$(round(_tstat[2],digits=1)), t(fp)=$(round(_tstat[3],digits=1)), R2=$(round(r2_lam,digits=2)) on n=$(length(_ylam)) ($(_nsat) dropped). It is not the noise channel (sigma_f varies only $(round(100*(maximum(_sfl_diag)/minimum(_sfl_diag)-1),digits=1))% across the composition range: R2=$(round(_r2_sig,digits=2)) alone, t=$(round(_t_sig,digits=2)) beside the fractions) and not cleanly the contrast channel either (|dHU| to the surrounding ring: R2=$(round(Md.r2,digits=2)) alone; with f_l neither survives, they are collinear at r=$(round(cor(G_fl[_isc],G_dhu[_isc]),digits=2)) because the background is fixed muscle). Root cause: the objective is nearly FLAT in lambda beyond ~30, and on the sector geometry it never turns back up at all ($(_pin_s)/$(count(_iss)) wedges pin at the grid top), so lambda* is a property of the REGION more than of the material. Delivered effect is correspondingly small: x$(round(_pv[1].model/_pv[1].global_,digits=2)) per-voxel RMSE on the calibration geometry, x$(round(_sect_ratio,digits=2)) on the held-out sector. Set default=true only with evidence from YOUR geometry.",
                     "insert_fl"=>lam_fl, "insert_fp"=>lam_fp, "insert_log10_lambda_star"=>lam_y,
                     "insert_censored"=>_sat, "insert_sigma_fl"=>_sfl_diag),
                 "lambda_transfers"=>"The lambda_model FORM transfers (lambda is evaluated at the observable decode, no GT at deployment), but its coefficients — like the scalar lambda — are supervised by THIS chain's phantom GT: refit both on a phantom for a new scanner/dose (insert_fl/fp/log10_lambda_star show the recipe). GT-free MC-SURE (correlated probe — the noise is not white, lag-1 ACF $(round(acf_x[2],digits=2))) was MEASURED as a reference: it picks lambda=$(LAM_SURE) vs $(LAM_GT) and costs x$(round(_sure_cost,digits=3)) per-voxel RMSE, so it is reported, not shipped."),
@@ -1575,28 +1575,45 @@ per-voxel RMSE vs GT over the **calibration** thoraxes ($(_gold.n) evaluations o
 held-out circular and sector scans are absent from that objective, so the table above is a test score, not a
 training score — and λ carries no literal, so a new scanner, dose or keV pair refits it.
 
-**λ does depend on the material. It still cannot be made into a λ(f̂) estimator here — and the three reasons are
-each measured** (§6.5, figs 11–12). *(i) The dependence is real but it is not the noise channel.* λ\\* falls with
-lipid at t = $(round(_tstat[2],digits=1)), but σ\\_f — the one channel that is a pure per-voxel composition
-quantity, and therefore geometry-free by construction — varies only
-$(round(100*(maximum(_sfl_diag)/minimum(_sfl_diag)-1),digits=1))% across the whole composition range and explains
-R² = $(round(_r2_sig,digits=2)) alone (t = $(round(_t_sig,digits=2)) beside the fractions). What is left is the
-*bias* channel: the contrast TV imports across a boundary, which is a relation between a voxel and its
-neighbours. *(ii) In this phantom, material and contrast are the same axis.* The background is fixed muscle, so
-an insert's f\\_l and its contrast to the surrounding ring are collinear; put both in the regression and R² barely
-moves while neither survives. *(iii) λ\\* is not even identified on the other geometry.* On the sector wedges the
-objective never turns back up — $(_pin_s)/$(count(_iss)) of their λ\\* pin at the top of a grid reaching
-λ=$(round(Int,LAMS_FIT[end])) — because a large, low-perimeter region can absorb unlimited smoothing before the
-boundary reaches its eroded core. A quantity that has an interior optimum on discs and none on wedges is a
-property of the **region**, not of the material in it.
+**Does λ depend on the material? Weakly — and far less than λ\\* depends on the region.** The question is worth
+asking because σ\\_f, the noise the TV weight balances against, is a function of composition. It is answered in
+§6.5 / figs 11–12, and the answer is mostly negative, for four measured reasons.
 
-Consequently the surface wins ×$(round(_pv[1].model/_pv[1].global_,digits=2)) per-voxel RMSE on the calibration
-geometry and **loses ×$(round(_sect_ratio,digits=2)) on the held-out sector — worse at the very quantity it was
-optimised for** — so the global λ ships and λ(f̂) is carried, reported, and off by default (`lambda=:model` to
-enable; the model card's `lambda_model.default` flips it for the offline consumers). Rejecting it is not
-selection-on-held-out: a held-out geometry failing at the objective's own metric is exactly what the sector
-phantom exists to detect. Making it work needs λ\\* measured across **geometries** as well as compositions — and
-a per-voxel λ fitted from *global*-λ sweeps also assumes a separability that spatially-varying λ does not have.
+*(i) The objective is nearly flat in λ.* Beyond λ ≈ 30 the calibration per-voxel RMSE changes by only a few
+percent out to λ = $(round(Int,LAMS_FIT[end])) (fig 12A). An argmin taken on a flat curve is dominated by noise,
+so "this insert's own λ\\*" is a weakly determined quantity before any model is fitted to it.
+
+*(ii) On the sector geometry λ\\* does not exist at all.* Its curve never turns back up:
+$(_pin_s)/$(count(_iss)) sector wedges pin at the top of the grid, because a large, low-perimeter region absorbs
+unlimited smoothing before the boundary reaches its eroded core. A quantity with an interior optimum on discs and
+none on wedges is a property of the **region**, not of the material inside it.
+
+*(iii) With the censored optima excluded, the composition effect is marginal.* $(_nsat)/$(length(lam_y))
+calibration inserts also pin, and they sit at low f\\_l — including them anchors the left end of the regression
+and manufactures a steep slope. Dropped, the fit gives f\\_l t = $(round(_tstat[2],digits=1)), f\\_p t =
+$(round(_tstat[3],digits=1)), **R² = $(round(r2_lam,digits=2))** on n = $(length(_ylam)).
+
+*(iv) Neither candidate mechanism survives.* σ\\_f — the one channel that is a pure per-voxel composition
+quantity, hence geometry-free by construction — varies only
+$(round(100*(maximum(_sfl_diag)/minimum(_sfl_diag)-1),digits=1))% across the whole composition range, explains
+R² = $(round(_r2_sig,digits=2)) alone and t = $(round(_t_sig,digits=2)) beside the fractions. The bias-channel
+alternative, contrast to the surrounding ring, explains R² = $(round(Md.r2,digits=2)) alone; with f\\_l it reaches
+R² = $(round(Mfd.r2,digits=2)) and neither term survives (t = $(round(Mfd.t[2],digits=1)) / $(round(Mfd.t[4],digits=1))),
+because in this phantom the background is fixed muscle and the two are collinear (r = $(round(cor(G_fl[_isc],G_dhu[_isc]),digits=2))).
+
+**What CAN be said geometry-free.** Comparing the two shapes with geometry as a nuisance intercept (fig 12B), the
+composition *slopes* are not distinguishable (interaction t = $(_testable ? string(round(Mgi.t[5],digits=2)) : "n/a")),
+while the intercepts clearly are: the sector sits about $(round(10^(_slope_s === nothing ? 0.0 : _slope_s.c[1]-_slope_c.c[1]),digits=1))× higher in λ\\*.
+So the shape of the story is "geometry sets the level, composition adds a weak tilt" — but the tilt is too weak
+and too flat to be worth parameterizing, which is exactly what the delivered numbers show: λ(f̂) runs
+×$(round(_model_cost,digits=3)) on calibration and ×$(round(_sect_ratio,digits=2)) on the held-out sector, i.e.
+barely distinguishable from a single global λ in either direction.
+
+The global λ therefore ships; λ(f̂) is carried, reported, and off by default (`lambda=:model` to enable, or
+`lambda_model.default` in the model card for the offline consumers). Making a λ(f̂) surface real would need λ\\*
+measured across **geometries** as well as compositions — and it would still inherit a methodological gap this
+notebook did not close: λ\\* is measured from *global*-λ sweeps but deployed **per voxel**, which assumes a
+separability that a spatially varying λ does not have.
 
 **What it costs, plainly.** The objective is the *map*, and the map is not free at the region level: vs the raw
 decode, the fitted λ leaves f\\_l CCC at $(round(ml.ccc,digits=4)) but multiplies ROI f\\_l RMSE by
