@@ -125,19 +125,38 @@ function tissue_model(r, p)
     A, B, τ = p
     [A + B*exp(-max(ri, 0.0)/τ) for ri in r]
 end
+const TAU_GRID = 0.5:0.5:120.0
 function fit_tissue(d, hu, sem, σ)
-    # evaluate on a fine grid that extends inside the wall, so the blur sees the real edge
-    rf = -6.0:0.1:30.0
+    # A and B enter LINEARLY and blur1d is row-normalised, so blur(A + B*e) = A + B*blur(e): only τ
+    # needs the O(n^2) blur, and (A,B) fall out of a 2x2 weighted least squares in closed form.
+    # That deletes their grids, and with them the boundary bug that pinned the diseased fit at
+    # A = -110.0 — the first value of the old `A in -110.0:1.0:-60.0`, i.e. an edge, not a minimum.
+    rf = collect(-6.0:0.1:30.0)      # extends inside the wall, so the blur sees the real edge
+    j = [argmin(abs.(rf .- di)) for di in d]
+    w = 1 ./ sem .^ 2                # the CSV's own standard error of the mean, per layer
     best = nothing; bestc = Inf
-    for A in -110.0:1.0:-60.0, B in 0.0:1.0:70.0, τ in 0.5:0.5:40.0
-        tf = tissue_model(rf, (A,B,τ))
-        bf = blur1d(tf, collect(rf), σ)
-        c = 0.0
-        for i in eachindex(d)
-            j = argmin(abs.(collect(rf) .- d[i]))
-            c += ((bf[j] - hu[i]) / sem[i])^2
-        end
-        c < bestc && (bestc = c; best = (A,B,τ))
+    for τ in TAU_GRID
+        u = blur1d([exp(-max(ri, 0.0)/τ) for ri in rf], rf, σ)[j]
+        s0, su, suu = sum(w), sum(w .* u), sum(w .* u .^ 2)
+        sy, suy = sum(w .* hu), sum(w .* u .* hu)
+        det = s0 * suu - su^2
+        abs(det) < 1e-12 && continue                      # u degenerate: this τ carries no shape
+        A = (suu * sy - su * suy) / det; B = (s0 * suy - su * sy) / det
+        c = sum(w .* (A .+ B .* u .- hu) .^ 2)
+        c < bestc && (bestc = c; best = (A, B, τ))
+    end
+    # τ is the only gridded parameter left. A fit sitting on either end is a boundary solution, not
+    # a minimum, and it must not reach the phantom silently — that is exactly how the old bug hid.
+    best === nothing && error("fit_tissue: no usable τ in TAU_GRID")
+    first(TAU_GRID) < best[3] < last(TAU_GRID) ||
+        error("fit_tissue: τ pinned at the grid edge ($(best[3]) mm) — widen TAU_GRID")
+    # the defining property of the least-squares solution: the weighted residual is orthogonal to
+    # both columns of the design matrix [1, u]. If the closed form above is wrong, this is what says so.
+    let u = blur1d([exp(-max(ri, 0.0)/best[3]) for ri in rf], rf, σ)[j],
+        res = w .* (best[1] .+ best[2] .* u .- hu)
+        scale = sum(w) * maximum(abs, hu)
+        (abs(sum(res)) < 1e-8 * scale && abs(sum(res .* u)) < 1e-8 * scale) ||
+            error("fit_tissue: normal equations not satisfied — closed form is wrong")
     end
     (best, sqrt(bestc/length(d)))
 end
@@ -146,12 +165,14 @@ println("\ntissue-domain profile recovered by forward-model fit (what the phanto
 @printf("%-9s %5s %10s %12s %8s %10s %10s %10s\n",
         "group","d_mm","HU_clin","HU_tissue","Δ_HU","f_w","f_l","f_p")
 newcomp = Dict{Tuple{String,Int}, NTuple{3,Float64}}()
+fitpars = Dict{String, NTuple{3,Float64}}()   # the figure replots THESE; never refit it separately
 for g in ("healthy","diseased")
     p = oxford[g]
     d = Float64[x[1] for x in p]; hu = Float64[x[2] for x in p]
     ratio = Float64[x[5]/x[3] for x in p]
     sem = Float64[x[6] for x in p]
     (pars, resid) = fit_tissue(d, hu, sem, σ̂)
+    fitpars[g] = pars
     @printf("  %-9s fit A=%.1f B=%.1f tau=%.2f mm  (weighted residual %.2f sigma)\n",
             g, pars..., resid)
     tis = tissue_model(d, pars)
@@ -189,8 +210,7 @@ ax2 = CM.Axis(fig[1,2]; title = "Oxford profile: clinical vs deconvolved tissue 
 const RF = collect(-6.0:0.1:30.0)
 for (g, col) in (("healthy", CM.RGBf(.20,.45,.80)), ("diseased", CM.RGBf(.85,.20,.18)))
     p = oxford[g]; d = Float64[x[1] for x in p]; hu = Float64[x[2] for x in p]
-    semv = Float64[x[6] for x in p]
-    (pars, _) = fit_tissue(d, hu, semv, σ̂)
+    pars = fitpars[g]
     # solid = the clinical curve; dashed = the tissue profile that produces it; dots = that same
     # tissue profile blurred once, which must land back on the solid line or the fit is wrong.
     CM.lines!(ax2, d, hu; color = col, linewidth = 2.5, label = "$g — clinical (blurred)")
@@ -201,5 +221,6 @@ for (g, col) in (("healthy", CM.RGBf(.20,.45,.80)), ("diseased", CM.RGBf(.85,.20
                 color = (col, 0.5), markersize = 7, label = "$g — re-blurred check")
 end
 CM.axislegend(ax2; position = :rb, framevisible = false, labelsize = 11)
-CM.save(joinpath(OUT, "pcat_deconv_design.png"), fig; px_per_unit = 2)
+CM.save(joinpath(OUT, "pcat_deconv_design.png"), fig;
+        px_per_unit = min(2.0, 2000 / maximum(fig.scene.viewport[].widths)))
 println("figure -> ", joinpath(OUT, "pcat_deconv_design.png"))
