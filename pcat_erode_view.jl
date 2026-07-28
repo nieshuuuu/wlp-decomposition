@@ -62,6 +62,28 @@ function erode2(mask::BitMatrix, n::Int)
 end
 allfat(sl) = ((sl .>= 40) .& (sl .<= 75)) .| ((sl .>= 88) .& (sl .<= 127)) .| (sl .== 29)
 
+# 3-D helpers for the --rois mode, matching pcat_20layer.jl exactly
+const ERODE_SHOW = length(ARGS) >= 3 ? parse(Int, ARGS[3]) : 8
+const ALLFAT3 = allfat(lab)
+"""Erode the union of ALL adipose by n voxels, per slice (pcat_20layer.jl's geometric PV rule)."""
+function fat_eroded(n::Int)
+    Ee = falses(size(ALLFAT3))
+    for z in axes(ALLFAT3, 3); Ee[:, :, z] = erode2(BitMatrix(ALLFAT3[:, :, z]), n); end
+    Ee
+end
+"""Labels of one (group, shell): the distance shell, plus the FEBio subrings for k <= K."""
+function shell_labels(g, k)
+    labs = Int[SHELL0[g] + k - 1]
+    k <= K && append!(labs, [fat_label(k, i-1) for (i,v) in enumerate(VESSELS) if VGROUP[v]==g])
+    labs
+end
+"""CartesianIndices of the (group, shell) ring over the whole valid volume."""
+function ROI(g, k; eroded = true, E = nothing)
+    labs = Set(shell_labels(g, k))
+    idx = [c for c in CartesianIndices(lab) if Int(lab[c]) in labs]
+    eroded ? [c for c in idx if E[c]] : idx
+end
+
 # ── pick the slice and the two vessels ───────────────────────────────────────────────
 """Centroid (in recon px) of a vessel's lumen on slice z, or nothing if it is not there."""
 function lumen_centre(sl, vi)
@@ -93,8 +115,102 @@ for p in picks
             p[1], VGROUP[p[1]], p[3], p[4], zsel)
 end
 
-# ── figure ───────────────────────────────────────────────────────────────────────────
 disp(A) = reverse(A; dims = 2)                       # anterior up
+
+# ══ MODE: --rois ═══════════════════════════════════════════════════════════════════
+# Where a data point actually comes from, and what the erosion is doing to it.
+#
+# One scored data point is ONE (group, shell) ring: every voxel in the volume carrying that
+# shell's labels, pooled over the group's three vessels and all valid z slices. Not a small
+# circular ROI, not a sphere, not a sample. The panels below show individual rings on the CT so
+# that is visible, with the surviving subset separated from the part erosion removes.
+#
+# The erosion itself is `erode2`: N iterations of 4-neighbour binary erosion of the union of ALL
+# adipose. Iterating a plus-shaped structuring element N times is a threshold on the CITY-BLOCK
+# distance to the nearest non-fat voxel, so a voxel survives iff that distance exceeds N.
+#
+# Why that is a defensible rule: it reads ONLY the label map. It never looks at the measured HU,
+# the decoded fractions, or the truth, so it cannot preferentially discard voxels that disagree
+# with the answer — which is exactly what gating on measured HU would do. It is one integer, it is
+# monotone in that integer, and the survival count per shell is deterministic and printable.
+#
+# Where it is NOT clean, stated rather than hidden: city-block distance is anisotropic, so the
+# clearance is N px along the axes but only N/sqrt(2) along the diagonals; the measured Euclidean
+# clearance is reported below. And it does not repair the boundary zone, it deletes it — where the
+# fat cuff is thinner than 2N px the ring disappears instead of being corrected.
+if "--rois" in ARGS
+    SHOW = [3, 8, 14, 20]
+    E = fat_eroded(ERODE_SHOW)
+    println("\nring provenance, erode $ERODE_SHOW px = $(round(ERODE_SHOW*PX_MM, digits=2)) mm")
+    @printf("%-9s %5s %10s %10s %8s\n", "group", "shell", "n_total", "n_kept", "kept%")
+    for g in ("healthy", "diseased"), k in SHOW
+        tot = ROI(g, k; eroded = false); kept = ROI(g, k; eroded = true, E = E)
+        @printf("%-9s %5d %10d %10d %7.0f%%\n", g, k, length(tot), length(kept),
+                100 * length(kept) / max(length(tot), 1))
+    end
+    # exact Euclidean clearance of surviving voxels, brute force on a window, subsampled
+    let W = ERODE_SHOW + 2, samp = Float64[]
+        nf = .!ALLFAT3
+        idx = [c for c in CartesianIndices(ALLFAT3) if E[c]]
+        for c in idx[1:97:end]
+            i, j, z = c.I; best = Inf
+            for dj in -W:W, di in -W:W
+                ii, jj = i + di, j + dj
+                (1 <= ii <= size(ALLFAT3,1) && 1 <= jj <= size(ALLFAT3,2)) || continue
+                nf[ii, jj, z] && (best = min(best, sqrt(Float64(di^2 + dj^2))))
+            end
+            isfinite(best) && push!(samp, best * PX_MM)
+        end
+        sort!(samp)
+        @printf("\nEuclidean clearance of surviving voxels (n=%d sampled): min %.2f mm, 5th pct %.2f mm, median %.2f mm\n",
+                length(samp), samp[1], samp[max(1, round(Int, 0.05*length(samp)))], samp[length(samp)÷2])
+        @printf("  city-block threshold was %d px = %.2f mm; along the diagonals that is only %.2f mm — the low end of the 2-3 mm boundary-artifact zone.\n",
+                ERODE_SHOW, ERODE_SHOW*PX_MM, ERODE_SHOW*PX_MM/sqrt(2))
+    end
+
+    fig = CM.Figure(size = (300*(1+length(SHOW)) + 120, 300*length(picks) + 150))
+    for (r, (vname, vi, cx, cy)) in enumerate(picks)
+        i0 = clamp(round(Int, cx) - HALF, 1, RECON_N - 2HALF)
+        j0 = clamp(round(Int, cy) - HALF, 1, RECON_N - 2HALF)
+        ii, jj = i0:(i0+2HALF), j0:(j0+2HALF)
+        g = VGROUP[vname]
+        ct = H70[ii, jj, zsel]; slc = Int.(sl[ii, jj])
+        ax = CM.Axis(fig[r, 1]; aspect = CM.DataAspect(), titlesize = 14,
+            title = r == 1 ? "CT, 70 keV" : "", ylabel = "$vname ($g)", ylabelsize = 13)
+        CM.heatmap!(ax, disp(ct); colormap = :grays, colorrange = (-200, 150))
+        CM.hidedecorations!(ax; label = false); CM.hidespines!(ax)
+        for (c, k) in enumerate(SHOW)
+            labs = Set(shell_labels(g, k))
+            ring = BitMatrix([L in labs for L in slc])
+            kept = ring .& BitMatrix(E[ii, jj, zsel])
+            nt = length(ROI(g, k; eroded = false)); nk = length(ROI(g, k; eroded = true, E = E))
+            axk = CM.Axis(fig[r, 1+c]; aspect = CM.DataAspect(), titlesize = 14,
+                title = r == 1 ? "shell $k  (one data point)" : "",
+                xlabel = @sprintf("%d of %d voxels kept (%.0f%%)", nk, nt, 100nk/max(nt,1)),
+                xlabelsize = 11)
+            CM.heatmap!(axk, disp(ct); colormap = :grays, colorrange = (-200, 150))
+            rm = fill(NaN, size(slc)); rm[ring .& .!kept] .= 1.0
+            kp = fill(NaN, size(slc)); kp[kept] .= 1.0
+            CM.heatmap!(axk, disp(rm); colormap = CM.cgrad([:firebrick,:firebrick]),
+                        colorrange = (0,1), nan_color = :transparent)
+            CM.heatmap!(axk, disp(kp); colormap = CM.cgrad([:gold,:gold]),
+                        colorrange = (0,1), nan_color = :transparent)
+            CM.hidedecorations!(axk; label = false); CM.hidespines!(axk)
+        end
+    end
+    CM.Label(fig[0, :], "One data point = one (group, shell) ring, pooled over the group's three " *
+        "vessels and all $(length(ZR)) valid z slices — shown here on one slice (clinical z $zsel). " *
+        "gold = survives the $(ERODE_SHOW) px ($(round(ERODE_SHOW*PX_MM,digits=2)) mm) erosion and is scored; " *
+        "dark red = removed by it. Erosion thresholds the city-block distance to non-fat, computed " *
+        "from LABELS only — never from the measured HU, the decode, or the truth.";
+        fontsize = 14, font = :bold, word_wrap = true)
+    path = joinpath(OUT, "pcat_roi_provenance.png")
+    CM.save(path, fig; px_per_unit = 1.6)
+    println("\nfigure -> ", path)
+    exit()
+end
+
+# ── figure ───────────────────────────────────────────────────────────────────────────
 ncol = 2 + length(ERODES)
 fig = CM.Figure(size = (300*ncol + 120, 300*length(picks) + 130))
 
