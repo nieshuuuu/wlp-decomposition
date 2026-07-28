@@ -556,7 +556,7 @@ begin
             lamr = lam === :model ? lambda_map(s.P.f0) : lam         # λ(f̂) map, built per scan (defined below)
             fl,fp = (lamr isa Number && lamr≤0) ? (s.P.f0[2],s.P.f0[3]) :
                     tv_coupled(s.P.f0[2],s.P.f0[3],s.P.gate; lambda=lamr,w=s.P.w,simplex=simplex)
-            F=(map((a,b)-> isnan(a) ? NaN : 1-a-b, fl,fp), fl, fp)
+            F=(map((a,b)-> isnan(a) ? NaN : max(1-a-b, 0.0), fl,fp), fl, fp)
             se=0.0; n=0
             for k in 1:s.nins, I in s.cores[k], c in 1:3
                 isfinite(F[c][I]) || continue
@@ -600,7 +600,7 @@ begin
         Threads.@threads for i in eachindex(CALPREP)
             s = CALPREP[i]
             fl,fp = tv_coupled(s.P.f0[2],s.P.f0[3],s.P.gate; lambda=lam,w=s.P.w)
-            F=(map((a,b)-> isnan(a) ? NaN : 1-a-b, fl,fp), fl, fp)
+            F=(map((a,b)-> isnan(a) ? NaN : max(1-a-b, 0.0), fl,fp), fl, fp)
             for k in 1:s.nins
                 se=0.0; n=0
                 for I in s.cores[k], c in 1:3
@@ -716,7 +716,7 @@ begin
         f0=fullfield(m_lo,m_hi); gate=.!isnan.(f0[2]); w=sigma_f_weight(m_lo,m_hi)
         lam = lambda === :model ? lambda_map(f0) : lambda
         fl_tv,fp_tv=tv_coupled(f0[2],f0[3],gate; lambda=lam,w=w,simplex=simplex)
-        fw_tv=map((a,b)-> isnan(a) ? NaN : 1-a-b, fl_tv, fp_tv)
+        fw_tv=map((a,b)-> isnan(a) ? NaN : max(1-a-b, 0.0), fl_tv, fp_tv)
         rec=cat(fw_tv,fl_tv,fp_tv;dims=3); tru=fill(NaN,size(m2)...,3); recgt=fill(NaN,size(m2)...,3)
         for k in 1:length(comps); lab=ROD0-1+k
             idx=findall(==(UInt8(lab)),m2); isempty(idx)&&continue
@@ -772,8 +772,8 @@ begin
             lamr = lambda === :model ? lambda_map(s.P.f0) : lambda
             fl,fp = (lamr isa Number && lamr≤0) ? (s.P.f0[2],s.P.f0[3]) :
                     tv_coupled(s.P.f0[2],s.P.f0[3],s.P.gate; lambda=lamr,w=s.P.w,simplex=simplex)
-            D=(map((a,b)-> isnan(a) ? NaN : 1-a-b, fl,fp), fl, fp)
-            R=(map((a,b)-> isnan(a) ? NaN : 1-a-b, s.P.f0[2],s.P.f0[3]), s.P.f0[2], s.P.f0[3])  # RAW decode
+            D=(map((a,b)-> isnan(a) ? NaN : max(1-a-b, 0.0), fl,fp), fl, fp)
+            R=(map((a,b)-> isnan(a) ? NaN : max(1-a-b, 0.0), s.P.f0[2],s.P.f0[3]), s.P.f0[2], s.P.f0[3])  # RAW decode
             for k in 1:s.nins
                 ci=s.cores[k]; isempty(ci)&&continue
                 v=[Float64[D[c][I] for I in ci if isfinite(D[c][I])] for c in 1:3]
@@ -1132,7 +1132,7 @@ begin
         Threads.@threads for i in eachindex(SECTPREP)
             s = SECTPREP[i]
             fl,fp = tv_coupled(s.P.f0[2],s.P.f0[3],s.P.gate; lambda=lam, w=s.P.w)
-            F=(map((a,b)-> isnan(a) ? NaN : 1-a-b, fl,fp), fl, fp)
+            F=(map((a,b)-> isnan(a) ? NaN : max(1-a-b, 0.0), fl,fp), fl, fp)
             for k in 1:s.nins
                 se=0.0; n=0
                 for I in s.cores[k], c in 1:3

@@ -97,5 +97,5 @@ function wlp_simplex(fl, fp)
     l = max(fl, 0.0); p = max(fp, 0.0)
     s = l + p
     s > 1.0 && (l /= s; p /= s)
-    (1.0 - l - p, l, p)
+    (max(1.0 - l - p, 0.0), l, p)   # max: the renormalized closure lands at -1e-17, not 0
 end
