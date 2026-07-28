@@ -1051,6 +1051,137 @@ let f=CM.Figure(size=(1500,470))
         safe_save(joinpath(ASSET,"fig11_lambda_vs_composition.png"),f); f
 end
 
+# ╔═╡ aaaa0034-0000-4000-8000-000000000034
+# ── Can the λ↔material relation be separated from geometry? DIAGNOSTIC ONLY. ──────────────────
+# Nothing here feeds the shipped λ: it measures λ* on the SECTOR scans, which are held out, so any
+# coefficient fitted with them is disqualified from shipping by the same rule that governs §6.
+# It is run to answer a physics question, not to choose an estimator.
+#
+# Two confounds are separable with the data already simulated:
+#  (1) CONTRAST vs COMPOSITION. λ* is set by the bias TV imports across a boundary, which scales
+#      with the contrast against the neighbourhood. In this phantom the background is fixed muscle,
+#      so an insert's f_l and its contrast-to-background are collinear — "λ depends on material"
+#      and "λ depends on contrast" fit the circular data equally well. The 4 calibration scans share
+#      one packing but redraw comps, so each insert's NEIGHBOURS change while its position does not:
+#      that breaks the collinearity. ΔHU is measured on a 3-px ring outside each insert — observable
+#      on any image, no GT, and defined identically for a disc and a wedge.
+#  (2) GEOMETRY AS A NUISANCE INTERCEPT. If the composition slope is the same on discs and wedges
+#      and only the intercept moves, the material dependence IS geometry-free and the shipped model
+#      failed only for want of a per-geometry offset. If the slopes differ, it is not.
+begin
+    function ring_idx(m2, lab, npx)                      # npx-px shell OUTSIDE a label, both shapes
+        idx = findall(==(UInt8(lab)), m2); isempty(idx) && return CartesianIndex{2}[]
+        i0,i1 = extrema(getindex.(idx,1)); j0,j1 = extrema(getindex.(idx,2))
+        I0 = max(i0-npx,1); I1 = min(i1+npx,size(m2,1)); J0 = max(j0-npx,1); J1 = min(j1+npx,size(m2,2))
+        inl = falses(I1-I0+1, J1-J0+1)
+        for I in idx; inl[I[1]-I0+1, I[2]-J0+1] = true; end
+        cur = copy(inl)
+        for _ in 1:npx
+            nxt = copy(cur)
+            for j in axes(cur,2), i in axes(cur,1)
+                cur[i,j] || continue
+                for (di,dj) in ((1,0),(-1,0),(0,1),(0,-1))
+                    ii,jj = i+di, j+dj
+                    (1≤ii≤size(cur,1) && 1≤jj≤size(cur,2)) && (nxt[ii,jj] = true)
+                end
+            end
+            cur = nxt
+        end
+        out = CartesianIndex{2}[]
+        for j in axes(cur,2), i in axes(cur,1)
+            (cur[i,j] && !inl[i,j]) && push!(out, CartesianIndex(i+I0-1, j+J0-1))
+        end
+        out
+    end
+    const RING_PX = 3
+    CIRC_RINGS = [ring_idx(map_m2, ROD0-1+k, RING_PX) for k in 1:NHEART]
+    SECT_RINGS = [ring_idx(smap_m2, ROD0-1+k, RING_PX) for k in 1:NSECT]
+
+    # ── λ* on the SECTOR scans, same grid + parabolic refinement as calibration ──────────────
+    SECTPREP = [s for s in TESTPREP if s.geom === :sector]
+    function sect_insert_rmse(lam)
+        out = fill(NaN, length(SECTPREP), NSECT)
+        Threads.@threads for i in eachindex(SECTPREP)
+            s = SECTPREP[i]
+            fl,fp = tv_coupled(s.P.f0[2],s.P.f0[3],s.P.gate; lambda=lam, w=s.P.w)
+            F=(map((a,b)-> isnan(a) ? NaN : 1-a-b, fl,fp), fl, fp)
+            for k in 1:s.nins
+                se=0.0; n=0
+                for I in s.cores[k], c in 1:3
+                    isfinite(F[c][I]) || continue; se += (F[c][I]-s.img.comps[k][c])^2; n += 1
+                end
+                n>0 && (out[i,k]=sqrt(se/n))
+            end
+        end
+        out
+    end
+    _scurves = [sect_insert_rmse(l) for l in LAMS_FIT]
+    # ── assemble both geometries: λ*, composition, and the measured ring contrast ────────────
+    G_geom=Symbol[]; G_y=Float64[]; G_fl=Float64[]; G_fp=Float64[]; G_dhu=Float64[]
+    function _push_set!(preps, curves, nins, rings, tag)
+        for i in eachindex(preps), k in 1:nins
+            ys = [curves[j][i,k] for j in eachindex(LAMS_FIT)]
+            all(isfinite,ys) || continue
+            s = preps[i]
+            lo = s.img.hu_lo[:,:,_midz(s.img.hu_lo)]
+            isempty(rings[k]) && continue
+            core = mean(Float64(lo[I]) for I in s.cores[k])
+            ring = mean(Float64(lo[I]) for I in rings[k])
+            push!(G_geom,tag); push!(G_y,refine_min(ys)); push!(G_dhu,abs(core-ring))
+            push!(G_fl, s.img.comps[k][2]); push!(G_fp, s.img.comps[k][3])
+        end
+    end
+    _push_set!(CALPREP,  _lcurves, NHEART, CIRC_RINGS, :circular)
+    _push_set!(SECTPREP, _scurves, NSECT,  SECT_RINGS, :sector)
+    _isc = G_geom .=== :circular; _iss = .!_isc
+    _ols(X,y) = (c=X\y; r=y.-X*c; s2=sum(r.^2)/(length(y)-size(X,2)); C=s2*inv(X'X);
+                 (c=c, t=c./[sqrt(C[i,i]) for i in 1:size(X,2)], r2=1-sum(r.^2)/sum((y.-mean(y)).^2)))
+    _one = ones(length(G_y))
+    # (1) contrast vs composition, CIRCULAR only (where the shipped model was fitted)
+    Mf  = _ols(hcat(_one[_isc], G_fl[_isc], G_fp[_isc]), G_y[_isc])                    # material only
+    Md  = _ols(hcat(_one[_isc], G_dhu[_isc]), G_y[_isc])                               # contrast only
+    Mfd = _ols(hcat(_one[_isc], G_fl[_isc], G_fp[_isc], G_dhu[_isc]), G_y[_isc])       # both
+    # (2) common-slope test: geometry as a nuisance intercept, then + interaction
+    _d = Float64.(_iss)
+    Mg  = _ols(hcat(_one, _d, G_fl, G_fp), G_y)                                        # shared slope
+    Mgi = _ols(hcat(_one, _d, G_fl, G_fp, _d.*G_fl), G_y)                              # + slope shift
+    _slope_c = _ols(hcat(_one[_isc], G_fl[_isc]), G_y[_isc])
+    _slope_s = _ols(hcat(_one[_iss], G_fl[_iss]), G_y[_iss])
+    let f=CM.Figure(size=(1420,470))
+        axA=CM.Axis(f[1,1];xlabel="true f_l",ylabel="log₁₀ λ*",titlesize=11,
+            title="same slope on both shapes? (geometry = intercept)")
+        for (m,tag,col) in ((_isc,"circular (ø$(round(2*INS_R,digits=1)) mm discs)",:steelblue),
+                            (_iss,"sector (wedges)",:darkorange))
+            CM.scatter!(axA,G_fl[m],G_y[m];color=(col,0.75),markersize=9,label=tag)
+            s=_ols(hcat(ones(count(m)),G_fl[m]),G_y[m]); g=range(extrema(G_fl[m])...,20)
+            CM.lines!(axA,g,s.c[1].+s.c[2].*g;color=col,linewidth=2)
+        end
+        CM.axislegend(axA;position=:lb,framevisible=false,labelsize=9)
+        CM.text!(axA,0.98,0.98;space=:relative,align=(:right,:top),fontsize=10,
+            text=@sprintf("slope: circular %+.2f   sector %+.2f\ninteraction t = %+.2f",
+                          _slope_c.c[2],_slope_s.c[2],Mgi.t[5]))
+        axB=CM.Axis(f[1,2];xlabel="|ΔHU| to the 3-px ring outside",ylabel="log₁₀ λ*",titlesize=11,
+            title="…or is it really the contrast?")
+        for (m,col) in ((_isc,:steelblue),(_iss,:darkorange))
+            CM.scatter!(axB,G_dhu[m],G_y[m];color=(col,0.75),markersize=9)
+        end
+        CM.text!(axB,0.98,0.98;space=:relative,align=(:right,:top),fontsize=10,
+            text=@sprintf("circular only:\n  f_l alone      R² %.2f\n  |ΔHU| alone    R² %.2f\n  both           R² %.2f\n  t(f_l|ΔHU) %+.2f   t(ΔHU|f_l) %+.2f",
+                          Mf.r2,Md.r2,Mfd.r2,Mfd.t[2],Mfd.t[4]))
+        axC=CM.Axis(f[1,3];xlabel="true f_l",ylabel="|ΔHU| to the ring",titlesize=11,
+            title="the confound itself: are they collinear?")
+        for (m,tag,col) in ((_isc,"circular",:steelblue),(_iss,"sector",:darkorange))
+            CM.scatter!(axC,G_fl[m],G_dhu[m];color=(col,0.75),markersize=9,label=tag)
+        end
+        CM.text!(axC,0.98,0.98;space=:relative,align=(:right,:top),fontsize=10,
+            text=@sprintf("corr(f_l, |ΔHU|)\n  circular %+.2f\n  sector   %+.2f",
+                          cor(G_fl[_isc],G_dhu[_isc]), cor(G_fl[_iss],G_dhu[_iss])))
+        CM.axislegend(axC;position=:lb,framevisible=false,labelsize=9)
+        CM.Label(f[0,:],"Separating λ↔material from λ↔geometry — DIAGNOSTIC (uses held-out sector λ*, so it cannot choose the shipped λ)";fontsize=12,font=:bold)
+        safe_save(joinpath(ASSET,"fig12_lambda_material_vs_geometry.png"),f); f
+    end
+end
+
 # ╔═╡ aaaa0026-0000-4000-8000-000000000026
 # Portable model snapshot — dumps the fitted surface + noise + gate + calibration table to
 # wlp_model_<pair>.toml (stdlib TOML, no BasisSimulator), so the model can be applied outside
@@ -1446,6 +1577,7 @@ only for linear/FBP recon, so a clinical DLIR/QIR transfer must re-earn it empir
 # ╟─aaaa0031-0000-4000-8000-000000000031
 # ╠═aaaa0032-0000-4000-8000-000000000032
 # ╟─aaaa0033-0000-4000-8000-000000000033
+# ╟─aaaa0034-0000-4000-8000-000000000034
 # ╠═aaaa0026-0000-4000-8000-000000000026
 # ╠═aaaa0027-0000-4000-8000-000000000027
 # ╠═aaaa0028-0000-4000-8000-000000000028
