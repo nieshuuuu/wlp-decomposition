@@ -589,7 +589,11 @@ begin
     # deployment λ is evaluated per voxel at the raw decode clamped onto the simplex: observable on
     # any image, no GT needed. The COEFFICIENTS are still supervised by THIS chain's phantom GT — a
     # new scanner/dose refits them (the TOML carries the recipe); the FORM is what transfers.
-    LAMS_FIT = 10.0 .^ range(-0.5, 2.0, length=13)
+    # Grid must bracket the optimum for BOTH geometries or λ* is censored, not measured: at the
+    # original [0.3, 100] ceiling the sector wedges pinned at 100 (large, low-surface-to-volume
+    # regions ⇒ smoothing is nearly free there), which silently turned their λ* into the ceiling
+    # value and made any slope fitted through them meaningless. Extended until nothing pins.
+    LAMS_FIT = 10.0 .^ range(-0.5, 3.5, length=17)
     LGL = log10.(LAMS_FIT); _lgh = LGL[2]-LGL[1]
     function cal_insert_rmse(lam)                    # per-(scan,insert) per-voxel RMSE at one λ
         out = fill(NaN, length(CALPREP), NHEART)
@@ -1134,6 +1138,10 @@ begin
     _push_set!(CALPREP,  _lcurves, NHEART, CIRC_RINGS, :circular)
     _push_set!(SECTPREP, _scurves, NSECT,  SECT_RINGS, :sector)
     _isc = G_geom .=== :circular; _iss = .!_isc
+    # A λ* sitting on a grid edge is censored, not measured — every slope through it is a lie.
+    _pin(m) = count(y -> y≥LGL[end]-1e-9 || y≤LGL[1]+1e-9, G_y[m])
+    _pin_c = _pin(_isc); _pin_s = _pin(_iss)
+    @assert _pin_c + _pin_s == 0 "λ* censored at the grid edge: $(_pin_c)/$(count(_isc)) circular, $(_pin_s)/$(count(_iss)) sector — widen LAMS_FIT"
     _ols(X,y) = (c=X\y; r=y.-X*c; s2=sum(r.^2)/(length(y)-size(X,2)); C=s2*inv(X'X);
                  (c=c, t=c./[sqrt(C[i,i]) for i in 1:size(X,2)], r2=1-sum(r.^2)/sum((y.-mean(y)).^2)))
     _one = ones(length(G_y))
