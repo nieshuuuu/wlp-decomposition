@@ -163,24 +163,30 @@ function fit_tissue(d, hu, sem, σ)
     (best, bestc)
 end
 const NPAR = 3                                   # A, B, τ — the degrees of freedom the fit spends
-reduced_chisq(chi2, n) = chi2 / (n - NPAR)
 
 println("\ntissue-domain profile recovered by forward-model fit (what the phantom should contain):")
 @printf("%-9s %5s %10s %12s %8s %10s %10s %10s\n",
         "group","d_mm","HU_clin","HU_tissue","Δ_HU","f_w","f_l","f_p")
 newcomp = Dict{Tuple{String,Int}, NTuple{3,Float64}}()
 fitpars = Dict{String, NTuple{3,Float64}}()   # the figure replots THESE; never refit it separately
-fitchi2ν = Dict{String, Float64}()            # reduced chi-square, annotated on the same figure
+fitrms = Dict{String, Float64}()              # residual standard deviation, annotated on the figure
 for g in ("healthy","diseased")
     p = oxford[g]
     d = Float64[x[1] for x in p]; hu = Float64[x[2] for x in p]
     ratio = Float64[x[5]/x[3] for x in p]
     sem = Float64[x[6] for x in p]
     (pars, chi2) = fit_tissue(d, hu, sem, σ̂)
-    fitpars[g] = pars; fitchi2ν[g] = reduced_chisq(chi2, length(d))
-    @printf("  %-9s fit A=%.1f B=%.1f tau=%.2f mm  (chi-square %.2f, reduced chi-square %.2f on %d dof)\n",
-            g, pars..., chi2, fitchi2ν[g], length(d) - NPAR)
     tis = tissue_model(d, pars)
+    fitpars[g] = pars
+    # Goodness of fit is reported as the residual standard deviation in HU, NOT as reduced
+    # chi-square. All 20 layers come from the SAME cohort and share the scanner's blur, so their
+    # errors are correlated — and the model's free offset A absorbs the common mode outright. A
+    # DIAGONAL chi²/ν therefore reads far below 1 (0.26 healthy, 0.69 diseased) for that reason
+    # alone and is not a goodness-of-fit number here. The rms residual assumes no independence.
+    # Full argument, with the three hypotheses that were tested: docs/pcat_deconv_design_math.md §9.
+    fitrms[g] = sqrt(sum((hu .- tis) .^ 2) / (length(d) - NPAR))
+    @printf("  %-9s fit A=%.1f B=%.1f tau=%.2f mm  (chi-square %.2f, residual %.2f HU rms on %d dof)\n",
+            g, pars..., chi2, fitrms[g], length(d) - NPAR)
     for i in eachindex(d)
         f = hu_to_frac(tis[i], ratio[i])
         newcomp[(g, Int(d[i]))] = f
@@ -233,10 +239,10 @@ CM.axislegend(ax2; position = :rt, labelsize = 11, framevisible = true,
 CM.text!(ax2, 1.3, -84.0;
     text = "chi-square fit of an exponential decay\n" *
            "T(r) = A + B exp(-r/tau)\n" *
-           @sprintf("healthy    tau = %.1f mm,  reduced chi-square = %.2f",
-                    fitpars["healthy"][3], fitchi2ν["healthy"]) * "\n" *
-           @sprintf("diseased   tau = %.1f mm,  reduced chi-square = %.2f",
-                    fitpars["diseased"][3], fitchi2ν["diseased"]),
+           @sprintf("healthy    tau = %.1f mm,  residual %.2f HU rms",
+                    fitpars["healthy"][3], fitrms["healthy"]) * "\n" *
+           @sprintf("diseased   tau = %.1f mm,  residual %.2f HU rms",
+                    fitpars["diseased"][3], fitrms["diseased"]),
     fontsize = 11, align = (:left, :top))
 CM.save(joinpath(OUT, "pcat_deconv_design.png"), fig;
         px_per_unit = min(2.0, 2000 / maximum(fig.scene.viewport[].widths)))

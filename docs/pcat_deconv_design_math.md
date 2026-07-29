@@ -169,16 +169,66 @@ $$\hat\tau \;=\; \arg\min_{\tau \,\in\, \{0.5,\,1.0,\,\dots,\,120.0\}} \; \chi^2
 then **assert** `0.5 < τ̂ < 120.0`. A fit sitting on either end of the grid is a boundary solution
 and must not reach the phantom silently — that is precisely how the old `A = -110.0` hid.
 
-The reported goodness of fit is the **reduced chi-square** — the minimised `χ²` per degree of
-freedom, with `p = 3` parameters spent (`A`, `B`, `τ`):
+Fitted values: healthy `(A, B, τ) = (-98.638, 24.989, 22.50)`, `χ² = 4.36`;
+diseased `(-127.639, 60.555, 47.00)`, `χ² = 11.68`. `fit_tissue` returns the raw `χ²_min`; the
+caller decides what to report.
 
-$$\chi^2_\nu \;=\; \frac{\chi^2_{\min}}{\nu}, \qquad \nu = N - p = 20 - 3 = 17$$
+**Goodness of fit is reported as the residual standard deviation, not reduced chi-square:**
 
-Fitted values: healthy `(A, B, τ) = (-98.638, 24.989, 22.50)`, `χ² = 4.36`, `χ²_ν = 0.26`;
-diseased `(-127.639, 60.555, 47.00)`, `χ² = 11.68`, `χ²_ν = 0.69`. **`χ²_ν < 1` means the
-three-parameter model fits the twenty points to inside their error bars** — the model is smoothing,
-not straining. `fit_tissue` returns the raw `χ²_min` and the caller divides by its own `ν`, so the
-convention lives in one place and is visible where it is used.
+$$s_{\mathrm{res}} \;=\; \sqrt{\frac{1}{\nu}\sum_i \big(y_i - T(d_i)\big)^2}, \qquad \nu = N - p = 17$$
+
+giving `0.72` HU (healthy) and `0.99` HU (diseased). Why not `χ²_ν` — see §9a.
+
+### §9a. Why the diagonal reduced chi-square is not quotable here
+
+`χ²_ν` computes to `0.256` (healthy) and `0.687` (diseased). Both are far below 1, which normally
+means the error bars are too large. Three hypotheses were tested; only the third survives.
+
+**H1 — the stated `s_i` are too large; use the digitization precision instead.** Rejected, and the
+sign is backwards. The digitization precision (`±0.25` HU, §16) is the error in *reading the bar off
+the figure*; it adds in quadrature to the statistical error rather than replacing it, so the honest
+`s_i` is *larger*, and `χ²_ν` would fall further. Forcing `s_i = 0.25` HU uniformly gives
+`χ²_ν = 7.81 / 14.82` and drags `τ` from `22.5 → 29.5` mm and `47.0 → 98.0` mm. A `98` mm decay
+length on a `20` mm profile is a straight line — the fit has stopped meaning anything.
+
+**H2 — the `0.25` HU quantization biased `s_i` upward.** Too small by an order of magnitude. Even if
+*every* `s_i` were the full `0.125` HU too large, `χ²_ν` moves only `0.256 → 0.319` and
+`0.687 → 0.867`.
+
+**H3 — the layer errors are correlated, and the model's offset `A` absorbs the common mode.**
+This is the explanation. All twenty layers are means over the *same* cohort, measured through the
+*same* point spread, so their errors are strongly correlated across `d`. But `A` is a free additive
+offset: it slides to swallow any common-mode error outright, so that component contributes almost
+nothing to the residual while its variance is still sitting in the `1/s_i^2` denominator. A diagonal
+`χ²` is then systematically too small — the error bars are correct, the diagonal weighting is not.
+
+**The discriminating test.** H3 predicts the two arms need *different* corrections, because their
+correlated fractions differ; any global misreading of the published bars must scale both arms
+identically. The scale factor `k` making `χ²_ν = 1` (a uniform rescale leaves the fit untouched) is
+`k = sqrt(χ²_ν)`:
+
+| arm | `χ²_ν` | `k` for `χ²_ν = 1` | `s_i` range implied | `χ²_ν` if bars were 95 % CI (`s/1.96`) |
+|---|---|---|---|---|
+| healthy | 0.256 | 0.506 | `0.51 – 0.89` HU | 0.985 |
+| diseased | 0.687 | 0.829 | `0.83 – 1.24` HU | 2.638 |
+
+The 95 % CI hypothesis lands healthy almost exactly on 1 and simultaneously pushes diseased to 2.6 —
+it repairs one arm by breaking the other, so it is not a global misreading. Needing `2.0×` on one arm
+and `1.2×` on the other is the signature H3 predicts.
+
+**Independent confirmation.** The second-difference estimator is model-free — any smooth trend
+cancels, and for independent noise `var(y_{i-1} - 2y_i + y_{i+1}) = 6\sigma^2`:
+
+$$\hat\sigma_{\text{indep}} \;=\; \sqrt{\tfrac{1}{6}\,\overline{\big(y_{i-1} - 2y_i + y_{i+1}\big)^2}}$$
+
+It returns `0.31` HU (healthy) and `0.36` HU (diseased) against a stored `s_i` median of `1.25` HU.
+So the layer-to-layer *independent* noise is roughly a quarter of the stated per-layer standard error
+of the mean: **most of `s_i` is common mode**, exactly as H3 requires.
+
+**Consequence.** Keep `s_i` as it stands — it is a correct per-layer standard error of the mean and
+the right relative weight. Do not quote `χ²_ν`. Report `s_res` in HU, which makes no independence
+assumption. Quoting `χ²_ν = 0.26` in a paper invites a reviewer question whose real answer is
+"the layers are not independent", not "the fit is too good".
 
 The script also asserts the defining property of the solution — that the weighted residual is
 orthogonal to both columns of the design matrix:
@@ -276,6 +326,66 @@ $$f_w = \frac{36.954}{151.452} = 0.24399, \qquad f_p = 0.10401 \times 0.24399 = 
 The CSV row reads `healthy,1,0.2440,0.7306,0.0254`. Agreement to the printed digits.
 
 ---
+
+## §16. What `s_i` actually is
+
+`s_i` is **the half-length of the error bar drawn on the published Oxford figure, read off by eye**.
+It lives in `wl-noise-aware-mmd/data/oxford_fai_gradient.csv`, columns
+`healthy_hu_standard_error_of_the_mean` and `diseased_hu_standard_error_of_the_mean`, whose header
+records the method verbatim:
+
+> per-layer standard error of the mean, digitized visually from the published figure's error bars
+> (quantized to 0.25 HU; digitization precision ~ +-0.25 HU per cap)
+
+Three facts follow, all of which matter downstream:
+
+1. **It is a standard error of the mean, not a standard deviation.** The mean is over a cohort of
+   more than 100 patients (A6). The per-patient standard deviation is `s_i · sqrt(N_patients)`, of
+   order `10–18` HU — an order of magnitude above every correction this file computes.
+2. **It is quantized to `0.25` HU, so it takes only four distinct values**: `1.00, 1.25, 1.50, 1.75`
+   (healthy) and `1.00, 1.25, 1.50` (diseased). It is a four-level staircase across the twenty
+   layers, not twenty independent uncertainty estimates. Treat the *shape* of `s_i` versus `d` as
+   indicative, not measured.
+3. **The `±0.25` HU digitization precision is a separate quantity** — how accurately the bar was
+   read, not how uncertain the underlying number is. It adds in quadrature to `s_i`; it does not
+   replace it. §9a/H1 is the worked consequence of confusing the two.
+
+`s_i` enters the algorithm in exactly one place: the weights `w_i = 1/s_i^2` of §6. Because a
+*uniform* rescaling of all `s_i` leaves the weights' ratios unchanged, it does not move the fitted
+`(A, B, τ)` at all — only the reported `χ²`. Only the *relative* profile of `s_i` across layers has
+any effect on the phantom.
+
+## §17. Where this file sits — the pipeline is prior-first
+
+The order of operations is **not** "fit HU, then look up the composition". It cannot be: §12 shows a
+single 120 kVp measurement leaves one degree of freedom open, so HU alone never determines a
+composition. Something must supply that degree of freedom, and here it is the adipose prior —
+consulted **upstream, in the clinical domain**, before any fitting happens.
+
+    1.  clinical HU  +  Woodard-1986 adipose prior            [examples/oxford_wlp_composition.jl]
+        importance sampling, 200k draws
+             -->  posterior (f_w, f_l, f_p) per layer          [oxford_wlp_composition.csv]
+
+    2.  keep ONLY the ratio                                    [this file, §13 / A5]
+             rho_i = f_p / f_w        <-- the prior's whole contribution, frozen
+
+    3.  chi-square fit of the exponential to the CLINICAL HU   [this file, §3-§10]
+             -->  tissue HU  H_i       <-- runs in HU space alone, never sees a composition
+
+    4.  H_i  +  frozen rho_i  -->  new (f_w, f_l, f_p)         [this file, §13]
+             -->  oxford_deconvolved_composition.csv
+
+So a composition is computed **twice**: once by the prior on the clinical HU, once algebraically on
+the tissue HU. Steps 3 and 4 are decoupled — the fit is pure HU, and the composition re-enters only
+through the single scalar `ρ_i`.
+
+**The design choice this hides.** The prior is *not* re-run on the tissue HU. Only `ρ` is
+transplanted from the clinical domain to the tissue domain, which is assumption A5. Re-running the
+sampler on `H_i` would return a slightly different `ρ`; `pcat_deconv_design.jl` deliberately does not
+(see its header: "That sampler is not reproduced here"). The justification is that freezing `ρ`
+perturbs along the prior's own isoline in the composition triangle rather than inventing a new
+locus — and the closure check of §13 verifies that feeding the clinical `H` back through the same
+algebra reproduces the prior's own answer to `Δ ≤ 0.0011`.
 
 ## §15. Provenance
 
