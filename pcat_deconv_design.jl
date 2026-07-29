@@ -57,7 +57,7 @@ const P_FP = Float64[c.f_p for c in PRIOR]
 const P_HU = P_FL .* HU_L .+ P_FP .* HU_P
 
 """
-    adipose_posterior(hu, σ) -> (f = (f_w,f_l,f_p), ess, hu_back)
+    adipose_posterior(hu, σ) -> (f = (f_w,f_l,f_p), sd, ess, hu_back)
 
 Importance-weight the adipose prior by a Gaussian HU likelihood centred on `hu` with width `σ`, and
 return the posterior mean composition. `hu_back` is that mean's own barycentric HU: a weighted mean
@@ -67,12 +67,14 @@ function adipose_posterior(hu, σ)
     lw = -0.5 .* ((P_HU .- hu) ./ σ) .^ 2
     w = exp.(lw .- maximum(lw)); w ./= sum(w)
     m(x) = sum(w .* x)
+    s(x) = sqrt(max(0.0, sum(w .* (x .- m(x)) .^ 2)))     # PRIOR-conditional spread, not measurement error
     f = (m(P_FW), m(P_FL), m(P_FP))
+    sd = (s(P_FW), s(P_FL), s(P_FP))
     # This becomes the phantom's GROUND TRUTH (simulated materials + every accuracy score's x-axis),
     # so an unphysical triple must fail here rather than propagate silently.
     (all(0.0 .<= f .<= 1.0) && sum(f) ≈ 1.0) ||
         error("adipose_posterior: hu=$hu sigma=$σ produced a non-composition $f")
-    (f = f, ess = 1 / sum(w .^ 2), hu_back = f[2] * HU_L + f[3] * HU_P)
+    (f = f, sd = sd, ess = 1 / sum(w .^ 2), hu_back = f[2] * HU_L + f[3] * HU_P)
 end
 
 @printf("adipose prior: %d draws; endpoints at %.1f keV are HU_l = %.3f, HU_p = %.3f\n",
@@ -203,6 +205,7 @@ println("\ntissue-domain profile recovered by forward-model fit (what the phanto
 @printf("%-9s %5s %10s %12s %8s %10s %10s %10s %9s\n",
         "group","d_mm","HU_clin","HU_tissue","Δ_HU","f_w","f_l","f_p","prior ess")
 newcomp = Dict{Tuple{String,Int}, NTuple{3,Float64}}()
+newsd   = Dict{Tuple{String,Int}, NTuple{3,Float64}}()   # prior-conditional spread, for the bands
 fitpars = Dict{String, NTuple{3,Float64}}()   # the figure replots THESE; never refit it separately
 fitrms = Dict{String, Float64}()              # residual standard deviation, annotated on the figure
 hu_gaps = Float64[]                           # |posterior mean's own HU - the HU it was given|
@@ -225,6 +228,7 @@ for g in ("healthy","diseased")
         # The prior runs HERE and only here — on the tissue HU, the value we actually believe.
         po = adipose_posterior(tis[i], sem[i])
         newcomp[(g, Int(d[i]))] = po.f
+        newsd[(g, Int(d[i]))] = po.sd
         push!(hu_gaps, abs(po.hu_back - tis[i]))
         Int(d[i]) <= 6 && @printf("%-9s %5d %10.2f %12.2f %+8.2f %10.4f %10.4f %10.4f %9.0f\n",
                                   g, Int(d[i]), hu[i], tis[i], tis[i]-hu[i], po.f..., po.ess)
@@ -240,10 +244,15 @@ open(joinpath(OUT, "oxford_deconvolved_composition.csv"), "w") do io
     println(io, "# Composition = Woodard-1986 adipose prior applied ONCE, to the TISSUE HU (200k draws,")
     println(io, "# importance-weighted by a Gaussian likelihood at that layer's standard error of the mean).")
     println(io, "# No composition is computed in the clinical domain. See pcat_deconv_design.jl")
-    println(io, "group,distance_mm,water_volume_fraction,lipid_volume_fraction,protein_volume_fraction")
+    println(io, "# The *_posterior_standard_deviation columns are the PRIOR-conditional spread at that")
+    println(io, "# layer's HU, not a measurement error. Nothing downstream reads them; they are the bands.")
+    println(io, join(("group", "distance_mm",
+                      "water_volume_fraction", "lipid_volume_fraction", "protein_volume_fraction",
+                      "water_volume_fraction_posterior_standard_deviation",
+                      "lipid_volume_fraction_posterior_standard_deviation",
+                      "protein_volume_fraction_posterior_standard_deviation"), ","))
     for g in ("healthy","diseased"), d in 1:20
-        f = newcomp[(g,d)]
-        println(io, "$g,$d,$(f[1]),$(f[2]),$(f[3])")
+        println(io, "$g,$d," * join(vcat(collect(newcomp[(g,d)]), collect(newsd[(g,d)])), ","))
     end
 end
 println("\nwrote ", joinpath(OUT, "oxford_deconvolved_composition.csv"))
@@ -287,3 +296,39 @@ CM.text!(ax2, 1.3, -84.0;
 CM.save(joinpath(OUT, "pcat_deconv_design.png"), fig;
         px_per_unit = min(2.0, 2000 / maximum(fig.scene.viewport[].widths)))
 println("figure -> ", joinpath(OUT, "pcat_deconv_design.png"))
+
+# ── figure 2: the composition the phantom actually gets ───────────────────────────────
+# The clinical-domain twin of this figure lives upstream (wl-noise-aware-mmd assets/
+# oxford_wlp_profiles.png) and describes the Oxford cohort. THIS one describes the phantom.
+let cH = CM.RGBf(.20,.45,.75), cD = CM.RGBf(.78,.22,.20), D = collect(1.0:20.0)
+    frac(g, k) = [newcomp[(g, Int(d))][k] for d in D]
+    spread(g, k) = [newsd[(g, Int(d))][k] for d in D]
+    f2 = CM.Figure(size = (1320, 900))
+    for (pos, k, ylab, ttl) in (((1,1), 1, "water volume fraction  f_w",   "(a) water — diseased is wetter at the wall"),
+                                ((1,2), 2, "lipid volume fraction  f_l",   "(b) lipid — the mirror of (a)"),
+                                ((2,1), 3, "protein volume fraction  f_p", "(c) protein — PRIOR-DRIVEN, band is prior spread"))
+        ax = CM.Axis(f2[pos...]; title = ttl, xlabel = "distance from the vessel wall  d (mm)",
+                     ylabel = ylab, titlesize = 13, xlabelsize = 11, ylabelsize = 11)
+        for (g, c) in (("healthy", cH), ("diseased", cD))
+            y = frac(g, k); e = spread(g, k)
+            CM.band!(ax, D, y .- e, y .+ e; color = (c, 0.18))
+            CM.scatterlines!(ax, D, y; color = c, markersize = 6, linewidth = 2, label = g)
+        end
+        CM.axislegend(ax; position = k == 2 ? :rb : :rt, labelsize = 10, framevisible = false)
+    end
+    ax4 = CM.Axis(f2[2,2]; title = "(d) Δ = diseased − healthy — the FAI signal, converging with distance",
+                  xlabel = "distance from the vessel wall  d (mm)", ylabel = "Δ volume fraction",
+                  titlesize = 13, xlabelsize = 11, ylabelsize = 11)
+    CM.hlines!(ax4, [0.0]; color = (:black, 0.4), linestyle = :dash)
+    for (k, c, lab) in ((1, CM.RGBf(.15,.45,.70), "Δf_w"), (2, CM.RGBf(.85,.45,.10), "Δf_l"),
+                        (3, CM.RGBf(.30,.60,.30), "Δf_p"))
+        CM.scatterlines!(ax4, D, frac("diseased", k) .- frac("healthy", k);
+                         color = c, markersize = 6, linewidth = 2, label = lab)
+    end
+    CM.axislegend(ax4; position = :rb, labelsize = 10, framevisible = false)
+    CM.Label(f2[0, :], "PCAT phantom composition — TISSUE domain, adipose prior applied once at the " *
+             @sprintf("fitted HU (E_eff = %.1f keV endpoints)", E_EFF); fontsize = 14, font = :bold)
+    CM.save(joinpath(OUT, "pcat_composition_profiles.png"), f2;
+            px_per_unit = min(2.0, 2000 / maximum(f2.scene.viewport[].widths)))
+    println("figure -> ", joinpath(OUT, "pcat_composition_profiles.png"))
+end
