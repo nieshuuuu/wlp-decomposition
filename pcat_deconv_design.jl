@@ -14,8 +14,19 @@
 # closed in the CSV by a Woodard&White adipose prior. That sampler is not reproduced here.
 # Instead the protein-to-water RATIO from each CSV row is held fixed and HU is re-solved:
 #     f_w = (HU + 111.69) / (111.69*(1+r) + 270.58*r),  f_p = r*f_w,  f_l = 1 - f_w - f_p
-# This reproduces the CSV exactly when HU is unchanged (verified below), so it perturbs along
-# the prior's own locus rather than inventing a new one.
+# This reproduces the CSV exactly when HU is unchanged (verified below).
+#
+# WHY THE RATIO, AND WHAT IT IS NOT. r is frozen PER LAYER, at that layer's own clinical value
+# (healthy: 0.104 at d=1 falling to 0.088 at d=20) — it is not a constant of adipose tissue. Under
+# the prior r moves strongly with HU (0.123 at -70 HU to 0.087 at -90 HU, dln(r)/dHU ~ 2-3 %/HU),
+# so holding it across the 0.6-2.1 HU clinical->tissue shift is WRONG by 1.5-7 %. The justification
+# is empirical, not physical: among the simple "hold one coordinate fixed" rules it tracks a full
+# prior re-run best, by 2.4x. Max deviation from the re-run, over 20 layers, healthy | diseased:
+#     freeze f_p/f_w  0.26 | 0.63 pp      freeze f_p       0.64 | 1.19 pp
+#     freeze f_p/f_l  0.80 | 1.51 pp      skip step 4      1.00 | 1.11 pp
+# Geometrically the prior's locus in (f_w, f_p) has slope 0.172; a constant-f_p rule is a horizontal
+# line (slope 0) and constant-r is a ray from the pure-lipid vertex (slope ~0.11) — the locus is
+# nearer the ray, but it is NOT the ray. See docs/pcat_deconv_design_math.md §17a.
 using Statistics: mean, median
 using Printf: @printf, @sprintf
 using DelimitedFiles: readdlm

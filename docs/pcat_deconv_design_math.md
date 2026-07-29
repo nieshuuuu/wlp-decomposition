@@ -52,8 +52,11 @@ two groups (healthy, diseased) — the numbers written into
 - **A4.** `μ` is volume-additive and water is the HU zero, so HU is **exactly** barycentric in the
   volume fractions. This is not an approximation.
 - **A5.** The protein-to-water ratio `ρ_i` is the same in the tissue domain as in the clinical
-  domain. This is the closure that replaces re-running the Woodard-1986 adipose prior; it moves
-  along the prior's own isoline rather than inventing a new one.
+  domain. Frozen **per layer**, at that layer's own clinical value — `ρ` is *not* claimed to be a
+  constant of adipose tissue, and it is not: under the prior it runs `0.104 → 0.088` across the
+  twenty layers, and `0.123 → 0.087` across `-70 → -90` HU. The assumption is only that the
+  `0.6–2.1` HU clinical-to-tissue shift does not move it. That is false at the `1.5–7 %` level and
+  the resulting error is priced in §17a. It is an empirical shortcut, not a physical law.
 - **A6.** `s_i` is the standard error of the **mean over a cohort of >100 patients**, not a
   single-patient standard deviation. Weighting by `1/s_i²` therefore fits the *cohort mean curve*,
   which is the right target for a phantom of "the average patient" — but the per-patient standard
@@ -178,6 +181,27 @@ caller decides what to report.
 $$s_{\mathrm{res}} \;=\; \sqrt{\frac{1}{\nu}\sum_i \big(y_i - T(d_i)\big)^2}, \qquad \nu = N - p = 17$$
 
 giving `0.72` HU (healthy) and `0.99` HU (diseased). Why not `χ²_ν` — see §9a.
+
+**Where the fit fails, and why it is not noise.** The largest residual in *both* arms is at the same
+layer, `d = 2` mm: `1.60` HU (healthy) and `2.08` HU (diseased), which against that layer's
+`s_i = 1.75` and `1.50` HU is `0.91` and `1.39` standard errors. Both are inside the error bars, but
+the coincidence of the worst point is structural, not statistical — it is **A2 being enforced**. The
+clinical curve is *non-monotone* over `d = 2–4` mm:
+
+| `d` (mm) | 1 | 2 | 3 | 4 | 5 |
+|---|---|---|---|---|---|
+| healthy HU | -75.37 | **-77.37** | -77.08 | **-76.67** | -77.62 |
+| diseased HU | -69.21 | **-71.69** | -71.40 | -71.45 | -71.86 |
+
+HU *rises* from `d = 2` to `d = 4` (healthy) and from `d = 2` to `d = 3` (diseased). A monotone
+`A + B e^{-r/τ}` cannot produce a local minimum, so the fit necessarily cuts across it and the
+residual is deposited at `d = 2`. Two consequences:
+
+- The near-wall layers are where the model is least trustworthy — and they are also where the
+  frozen-`ρ` closure costs the most (§17a), for the same reason: both errors scale with `ΔH`.
+- Whether the bump is real physiology or digitization is not decidable from these data. It is
+  `~1` HU on a cohort mean whose per-patient spread is `10–18` HU (A6). Treating it as signal would
+  require a fourth parameter that twenty correlated points cannot support.
 
 ### §9a. Why the diagonal reduced chi-square is not quotable here
 
@@ -407,9 +431,48 @@ likelihood re-centred on `H_i` with the same `s_i`:
 
 The error concentrates at small `d` because `ρ` is a smooth function of HU under the prior
 (`dlnρ/dHU ≈ 2–3 %/HU`), so freezing it costs `(dlnρ/dHU) × ΔH` — and `ΔH` is largest exactly where
-the exponential model misfits, at `d = 2` mm (§9, residual `1.60 / 2.08` HU). **Verdict: keep A5.**
-`0.63` pp sits below the `1.8–2.8` pp working accuracy of the downstream decode, and removing it
-would mean pulling `wl-noise-aware-mmd`'s sampler into this repository.
+the exponential model misfits, at `d = 2` mm (§9, residual `1.60 / 2.08` HU).
+
+### §17b. Why freeze the *ratio* — the honest answer
+
+The objection is correct: `f_p/f_w` is not fixed in real adipose tissue, and the prior says so
+loudly. Across the HU range of interest:
+
+| HU | `ρ = f_p/f_w` | `f_p` |
+|---|---|---|
+| -70 | 0.12323 | 0.03228 |
+| -80 | 0.09580 | 0.02047 |
+| -90 | 0.08720 | 0.01310 |
+
+`ρ` falls `29 %` over that span. **The justification originally written into the script — that
+freezing `ρ` "perturbs along the prior's own locus" — is a non-sequitur** and has been removed.
+Reproducing the clinical point at `ΔH = 0` says nothing about the *direction* of motion for
+`ΔH ≠ 0`. The frozen-`ρ` direction is a ray from the pure-lipid vertex; if the prior's locus were
+that ray, `ρ` would be constant along it, and the table above shows it is not.
+
+**The real justification is empirical.** Every closure is a choice of which coordinate to hold while
+sliding to the new isoline. Scored against a full prior re-run — the fully consistent answer — as
+the maximum deviation over all twenty layers, in percentage points:
+
+| rule | healthy | diseased |
+|---|---|---|
+| freeze `f_p/f_w` (shipped) | **0.26** | **0.63** |
+| freeze `f_p` | 0.64 | 1.19 |
+| freeze `f_p/f_l` | 0.80 | 1.51 |
+| skip step 4 entirely | 1.00 | 1.11 |
+
+Freezing the ratio wins by `2.4×` over the next best rule. The geometric reason is visible in
+`(f_w, f_p)`: the prior's locus runs from `(0.150, 0.0131)` at `-90` HU to `(0.262, 0.0323)` at
+`-70` HU, slope `0.172`. A constant-`f_p` rule is a horizontal line (slope `0`); constant-`ρ` is a
+ray from the origin of slope `≈ 0.11`. The locus is nearer the ray than the horizontal — `ρ` is
+simply the slowest-varying of the candidates (`-29 %` against `f_p`'s `-59 %`), so it absorbs most
+of the HU dependence. Nearer, but not equal: that residual tilt *is* the `0.26 / 0.63` pp.
+
+**Verdict: keep A5, drop the physical claim.** `0.63` pp sits below the `1.8–2.8` pp working accuracy
+of the downstream decode, and removing it would mean pulling `wl-noise-aware-mmd`'s sampler into this
+repository. But it must be documented as the best of several arbitrary rules, not as physics — if the
+downstream accuracy ever reaches `0.5` pp, re-running the prior is the correct fix, not a better
+ratio.
 
 ⚠️ **The §13 closure check does not test A5.** The `ρ` ray is drawn *through* the clinical posterior
 mean, so verifying that feeding the clinical `H` back reproduces the prior's own fractions to
