@@ -380,12 +380,42 @@ the tissue HU. Steps 3 and 4 are decoupled — the fit is pure HU, and the compo
 through the single scalar `ρ_i`.
 
 **The design choice this hides.** The prior is *not* re-run on the tissue HU. Only `ρ` is
-transplanted from the clinical domain to the tissue domain, which is assumption A5. Re-running the
-sampler on `H_i` would return a slightly different `ρ`; `pcat_deconv_design.jl` deliberately does not
-(see its header: "That sampler is not reproduced here"). The justification is that freezing `ρ`
-perturbs along the prior's own isoline in the composition triangle rather than inventing a new
-locus — and the closure check of §13 verifies that feeding the clinical `H` back through the same
-algebra reproduces the prior's own answer to `Δ ≤ 0.0011`.
+transplanted from the clinical domain to the tissue domain, which is assumption A5.
+`pcat_deconv_design.jl` deliberately does not re-sample (see its header: "That sampler is not
+reproduced here").
+
+### §17a. The geometry of step 4, and what A5 costs
+
+Work in `(f_w, f_p)` coordinates — an affine image of the composition triangle, with `f_l` recovered
+from closure. Both constraints stay straight lines:
+
+$$\text{HU:}\quad f_w \;=\; 1 + \frac{H}{111.695} \;-\; 3.42256\,f_p, \qquad\qquad \text{ratio:}\quad f_p \;=\; \rho\, f_w$$
+
+The ratio line passes through the origin `(f_w, f_p) = (0,0)`, which is the **pure-lipid vertex**.
+So step 4 is: *intersect the tissue HU isoline with a ray from the pure-lipid vertex whose slope is
+the frozen `ρ`.* Freezing `ρ` is geometrically the statement that the clinical→tissue move is
+constrained to slide **along that ray**; re-running the prior would let it leave the ray, and the
+cost of A5 is exactly the off-ray component.
+
+**Measured cost** — same sampler, same seed (`adipose_sample_comps(200_000; seed = 20260727)`),
+likelihood re-centred on `H_i` with the same `s_i`:
+
+| arm | max `|Δρ|/ρ` | max `|Δf|` | where | beyond `d ≈ 5` mm |
+|---|---|---|---|---|
+| healthy | 3.32 % | **0.26 pp** | `d = 2` mm | `< 0.1` pp |
+| diseased | 7.09 % | **0.63 pp** | `d = 2` mm | `< 0.1` pp |
+
+The error concentrates at small `d` because `ρ` is a smooth function of HU under the prior
+(`dlnρ/dHU ≈ 2–3 %/HU`), so freezing it costs `(dlnρ/dHU) × ΔH` — and `ΔH` is largest exactly where
+the exponential model misfits, at `d = 2` mm (§9, residual `1.60 / 2.08` HU). **Verdict: keep A5.**
+`0.63` pp sits below the `1.8–2.8` pp working accuracy of the downstream decode, and removing it
+would mean pulling `wl-noise-aware-mmd`'s sampler into this repository.
+
+⚠️ **The §13 closure check does not test A5.** The `ρ` ray is drawn *through* the clinical posterior
+mean, so verifying that feeding the clinical `H` back reproduces the prior's own fractions to
+`Δ ≤ 0.0011` only confirms that the posterior mean lies on its own HU isoline. That is a real check
+— a weighted posterior mean need not be HU-consistent, and here it is off by `0.086` HU — but it is
+silent about transplanting `ρ` across domains. Only the re-run above prices that.
 
 ## §15. Provenance
 
