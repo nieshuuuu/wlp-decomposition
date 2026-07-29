@@ -9,71 +9,95 @@
 # profile to recover a tissue-domain profile, and assign THAT to the phantom. Re-simulating then
 # blurs exactly once and should land back on the clinical curve — which is the testable claim.
 #
-# Closure for HU -> fractions. The Oxford model is one equation in two free fractions:
-#     HU = f_l*(-111.69) + f_p*(270.58),   f_w + f_l + f_p = 1
-# closed in the CSV by a Woodard&White adipose prior. That sampler is not reproduced here.
-# Instead the protein-to-water RATIO from each CSV row is held fixed and HU is re-solved:
-#     f_w = (HU + 111.69) / (111.69*(1+r) + 270.58*r),  f_p = r*f_w,  f_l = 1 - f_w - f_p
-# This reproduces the CSV exactly when HU is unchanged (verified below).
+# ORDER OF OPERATIONS. HU is EXACTLY barycentric in the volume fractions — mu is volume-additive
+# and water is the HU zero — so
+#     HU = f_l*HU_l + f_p*HU_p,     f_w + f_l + f_p = 1
+# and one 120 kVp measurement fixes a LINE SEGMENT in the composition triangle, not a point. Single
+# energy under-determines three materials by exactly one degree of freedom, and the Woodard-1986
+# adipose prior is what supplies it. The pipeline therefore has two operations, in this order:
 #
-# WHY THE RATIO, AND WHAT IT IS NOT. r is frozen PER LAYER, at that layer's own clinical value
-# (healthy: 0.104 at d=1 falling to 0.088 at d=20) — it is not a constant of adipose tissue. Under
-# the prior r moves strongly with HU (0.123 at -70 HU to 0.087 at -90 HU, dln(r)/dHU ~ 2-3 %/HU),
-# so holding it across the 0.6-2.1 HU clinical->tissue shift is WRONG by 1.5-7 %. The justification
-# is empirical, not physical: among the simple "hold one coordinate fixed" rules it tracks a full
-# prior re-run best, by 2.4x. Max deviation from the re-run, over 20 layers, healthy | diseased:
-#     freeze f_p/f_w  0.26 | 0.63 pp      freeze f_p       0.64 | 1.19 pp
-#     freeze f_p/f_l  0.80 | 1.51 pp      skip step 4      1.00 | 1.11 pp
-# Geometrically the prior's locus in (f_w, f_p) has slope 0.172; a constant-f_p rule is a horizontal
-# line (slope 0) and constant-r is a ray from the pure-lipid vertex (slope ~0.11) — the locus is
-# nearer the ray, but it is NOT the ray. See docs/pcat_deconv_design_math.md §17a.
+#     (a) clinical HU -> tissue HU     a fit, entirely in HU space; composition never appears
+#     (b) tissue  HU -> composition    the prior, applied ONCE, in the domain we actually believe
+#
+# (a) runs FIRST precisely because it needs no composition. Nothing is ever computed in the clinical
+# composition domain and nothing is transported between domains, so the only approximations left are
+# the prior itself and the smooth-profile assumption of section 3 — both physical statements about
+# adipose tissue. Derivation: docs/pcat_deconv_design_math.md
 using Statistics: mean, median
 using Printf: @printf, @sprintf
 using DelimitedFiles: readdlm
+using Unitful: @u_str
+import Unitful
+import BasisSimulator as BS
 import CairoMakie as CM
 
 const OUT = joinpath(@__DIR__, "pcat_ct")
-const CSV = "/Volumes/Molloilab/Shu Nie/water-lipid-protein/oxford_wlp_composition.csv"
-const HU_L, HU_P = -111.69, 270.58        # lipid / protein endpoints of the Oxford single-energy model
 
-# ── 1. Oxford profile ─────────────────────────────────────────────────────────────────
-oxford = Dict{String, Vector{NTuple{6,Float64}}}()   # group -> [(d, hu, fw, fl, fp, sem)]
+# ── 0. the adipose prior, included from its canonical home ───────────────────────────
+# SSoT: the sampler lives in wl-noise-aware-mmd and is INCLUDED here, never copied. The seed matches
+# that repo's examples/oxford_wlp_composition.jl so both draw the identical cloud.
+const WLNAM = normpath(joinpath(@__DIR__, "..", "wl-noise-aware-mmd"))
+isdir(WLNAM) ||
+    error("adipose prior unavailable: expected wl-noise-aware-mmd beside this repo, at $WLNAM")
+for f in ("wl_mixture.jl", "wlp_mixture.jl", "wlp_priors.jl", "wlp_adipose_sampler.jl")
+    include(joinpath(WLNAM, "src", f))
+end
+
+# Endpoints are COMPUTED, not pasted. E_eff = 70.0 keV is the effective energy of the 120 kVp
+# closure this HU curve was measured through (wl-noise-aware-mmd data/analysis/oxford_closure.toml).
+const E_EFF = 70.0
+mu(m, E) = Float64(Unitful.ustrip(u"cm^-1", BS.XA.linear_attenuation_coeff(m, E * u"keV")))
+hu_of(m, E) = 1000.0 * (mu(m, E) - mu(_WL_WATER, E)) / mu(_WL_WATER, E)
+const HU_L, HU_P = hu_of(_WL_LIPID, E_EFF), hu_of(_WLP_PROT, E_EFF)
+
+const PRIOR = adipose_sample_comps(200_000; seed = 20260727)
+const P_FW = Float64[c.f_w for c in PRIOR]
+const P_FL = Float64[c.f_l for c in PRIOR]
+const P_FP = Float64[c.f_p for c in PRIOR]
+const P_HU = P_FL .* HU_L .+ P_FP .* HU_P
+
+"""
+    adipose_posterior(hu, σ) -> (f = (f_w,f_l,f_p), ess, hu_back)
+
+Importance-weight the adipose prior by a Gaussian HU likelihood centred on `hu` with width `σ`, and
+return the posterior mean composition. `hu_back` is that mean's own barycentric HU: a weighted mean
+of compositions need NOT be exactly HU-consistent, and the gap is reported rather than assumed away.
+"""
+function adipose_posterior(hu, σ)
+    lw = -0.5 .* ((P_HU .- hu) ./ σ) .^ 2
+    w = exp.(lw .- maximum(lw)); w ./= sum(w)
+    m(x) = sum(w .* x)
+    f = (m(P_FW), m(P_FL), m(P_FP))
+    # This becomes the phantom's GROUND TRUTH (simulated materials + every accuracy score's x-axis),
+    # so an unphysical triple must fail here rather than propagate silently.
+    (all(0.0 .<= f .<= 1.0) && sum(f) ≈ 1.0) ||
+        error("adipose_posterior: hu=$hu sigma=$σ produced a non-composition $f")
+    (f = f, ess = 1 / sum(w .^ 2), hu_back = f[2] * HU_L + f[3] * HU_P)
+end
+
+@printf("adipose prior: %d draws; endpoints at %.1f keV are HU_l = %.3f, HU_p = %.3f\n",
+        length(P_FW), E_EFF, HU_L, HU_P)
+
+# ── 1. the clinical HU gradient ───────────────────────────────────────────────────────
+# SSoT is the gradient file itself, not a composition derived from it. Note this also means the
+# script no longer needs the SMB share mounted.
+const GRAD = joinpath(WLNAM, "data", "oxford_fai_gradient.csv")
+oxford = Dict{String, Vector{NTuple{3,Float64}}}()   # group -> [(d, hu, standard error of the mean)]
 let hdr = nothing
-    for ln in eachline(CSV)
-        startswith(ln, "#") && continue
-        f = split(strip(ln), ',')
+    for ln in eachline(GRAD)
+        (startswith(strip(ln), "#") || isempty(strip(ln))) && continue
+        f = strip.(split(strip(ln), ','))
         if hdr === nothing; hdr = f; continue; end
-        ix(n) = findfirst(==(n), hdr)
-        g = f[ix("group")]
-        push!(get!(oxford, g, NTuple{6,Float64}[]),
-              (parse(Float64,f[ix("distance_mm")]), parse(Float64,f[ix("hu")]),
-               parse(Float64,f[ix("water_volume_fraction")]),
-               parse(Float64,f[ix("lipid_volume_fraction")]),
-               parse(Float64,f[ix("protein_volume_fraction")]),
-               parse(Float64,f[ix("hu_standard_error_of_the_mean")])))
+        ix(n) = (k = findfirst(==(n), hdr); k === nothing && error("$GRAD: no column '$n'"); k)
+        d = parse(Float64, f[ix("distance_mm")])
+        for (g, hc, sc) in (("healthy",  "healthy_hu",  "healthy_hu_standard_error_of_the_mean"),
+                            ("diseased", "diseased_hu", "diseased_hu_standard_error_of_the_mean"))
+            push!(get!(oxford, g, NTuple{3,Float64}[]),
+                  (d, parse(Float64, f[ix(hc)]), parse(Float64, f[ix(sc)])))
+        end
     end
 end
 for g in keys(oxford); sort!(oxford[g], by = x -> x[1]); end
-
-hu_to_frac(hu, ratio) = begin
-    fw = (hu - HU_L) / (-HU_L * (1 + ratio) + HU_P * ratio)
-    fp = ratio * fw
-    f = (fw, 1 - fw - fp, fp)
-    # These become the phantom's GROUND TRUTH (simulated materials + every accuracy score's
-    # x-axis), so an out-of-range fraction must fail here, not propagate silently — today the
-    # fit-grid bounds keep hu in range, but that is an accident of the grid, not an invariant.
-    all(0.0 .<= f .<= 1.0) || error("hu_to_frac out of [0,1]: hu=$hu ratio=$ratio -> $f")
-    f
-end
-
-println("closure check — re-solving the CSV's own HU must return the CSV's own fractions:")
-for g in ("healthy","diseased"), d in (1, 10, 20)
-    row = oxford[g][d]
-    r = row[5] / row[3]
-    f = hu_to_frac(row[2], r)
-    @printf("  %-9s %2dmm  CSV (%.4f, %.4f, %.4f)  resolved (%.4f, %.4f, %.4f)  Δ=%.5f\n",
-            g, d, row[3], row[4], row[5], f..., maximum(abs.(f .- (row[3],row[4],row[5]))))
-end
 
 # ── 2. point spread, estimated from this simulation's own radial profile ──────────────
 # measured(r) = (truth ⊛ G_σ)(r). Fit σ on the vessels with clean, well-populated profiles.
@@ -176,16 +200,15 @@ end
 const NPAR = 3                                   # A, B, τ — the degrees of freedom the fit spends
 
 println("\ntissue-domain profile recovered by forward-model fit (what the phantom should contain):")
-@printf("%-9s %5s %10s %12s %8s %10s %10s %10s\n",
-        "group","d_mm","HU_clin","HU_tissue","Δ_HU","f_w","f_l","f_p")
+@printf("%-9s %5s %10s %12s %8s %10s %10s %10s %9s\n",
+        "group","d_mm","HU_clin","HU_tissue","Δ_HU","f_w","f_l","f_p","prior ess")
 newcomp = Dict{Tuple{String,Int}, NTuple{3,Float64}}()
 fitpars = Dict{String, NTuple{3,Float64}}()   # the figure replots THESE; never refit it separately
 fitrms = Dict{String, Float64}()              # residual standard deviation, annotated on the figure
+hu_gaps = Float64[]                           # |posterior mean's own HU - the HU it was given|
 for g in ("healthy","diseased")
     p = oxford[g]
-    d = Float64[x[1] for x in p]; hu = Float64[x[2] for x in p]
-    ratio = Float64[x[5]/x[3] for x in p]
-    sem = Float64[x[6] for x in p]
+    d = Float64[x[1] for x in p]; hu = Float64[x[2] for x in p]; sem = Float64[x[3] for x in p]
     (pars, chi2) = fit_tissue(d, hu, sem, σ̂)
     tis = tissue_model(d, pars)
     fitpars[g] = pars
@@ -199,18 +222,24 @@ for g in ("healthy","diseased")
     @printf("  %-9s fit A=%.1f B=%.1f tau=%.2f mm  (chi-square %.2f, residual %.2f HU rms on %d dof)\n",
             g, pars..., chi2, fitrms[g], length(d) - NPAR)
     for i in eachindex(d)
-        f = hu_to_frac(tis[i], ratio[i])
-        newcomp[(g, Int(d[i]))] = f
-        Int(d[i]) <= 6 && @printf("%-9s %5d %10.2f %12.2f %+8.2f %10.4f %10.4f %10.4f\n",
-                                  g, Int(d[i]), hu[i], tis[i], tis[i]-hu[i], f...)
+        # The prior runs HERE and only here — on the tissue HU, the value we actually believe.
+        po = adipose_posterior(tis[i], sem[i])
+        newcomp[(g, Int(d[i]))] = po.f
+        push!(hu_gaps, abs(po.hu_back - tis[i]))
+        Int(d[i]) <= 6 && @printf("%-9s %5d %10.2f %12.2f %+8.2f %10.4f %10.4f %10.4f %9.0f\n",
+                                  g, Int(d[i]), hu[i], tis[i], tis[i]-hu[i], po.f..., po.ess)
     end
 end
+@printf("\nposterior means are HU-consistent to %.3f HU (a weighted mean of compositions need not be)\n",
+        maximum(hu_gaps))
 
 open(joinpath(OUT, "oxford_deconvolved_composition.csv"), "w") do io
     println(io, "# Oxford radial profile inverted to the TISSUE domain by forward-model fit")
     println(io, "# (sigma = $(round(σ̂,digits=3)) mm, FWHM = $(round(fwhm,digits=3)) mm), so that")
     println(io, "# re-simulating blurs ONCE and the measurement returns to the clinical curve.")
-    println(io, "# Closure: protein/water ratio held at the CSV row's own value; see pcat_deconv_design.jl")
+    println(io, "# Composition = Woodard-1986 adipose prior applied ONCE, to the TISSUE HU (200k draws,")
+    println(io, "# importance-weighted by a Gaussian likelihood at that layer's standard error of the mean).")
+    println(io, "# No composition is computed in the clinical domain. See pcat_deconv_design.jl")
     println(io, "group,distance_mm,water_volume_fraction,lipid_volume_fraction,protein_volume_fraction")
     for g in ("healthy","diseased"), d in 1:20
         f = newcomp[(g,d)]

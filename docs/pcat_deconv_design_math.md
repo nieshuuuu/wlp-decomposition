@@ -11,7 +11,7 @@ There is **no image-domain processing in this algorithm.** It operates on a tabl
 
 The only step that ever touches a reconstructed image is §2, where the blur width `σ` is measured
 off the simulation's own radial HU profile. Everything after that is a 20-point curve fit and an
-algebraic HU-to-fractions inversion. In particular there is no deconvolution filter, no Wiener
+weighted mean over a prior cloud. In particular there is no deconvolution filter, no Wiener
 filter, no Richardson–Lucy, no unsharp mask, and nothing is applied to a voxel grid.
 
 This matters because "deconvolution" invites the wrong mental model. The output is not a corrected
@@ -27,7 +27,7 @@ that simulating it — which blurs once — returns the clinical curve.
 | `d_i` | distance from the vessel wall, layer `i` | `1, 2, …, 20` mm (`N = 20`) |
 | `y_i` | clinical HU at layer `i` | `-75.37 … -88.08` (healthy) |
 | `s_i` | standard error of the **cohort mean** HU at layer `i` | `1.00 … 1.75` HU |
-| `ρ_i` | protein-to-water ratio `f_p/f_w` from the clinical composition | `0.088 … 0.104` |
+| prior | Woodard-1986 adipose composition cloud | 200k draws, seed `20260727` |
 | `HU_w` | water endpoint | `0` by definition |
 | `HU_l` | lipid endpoint at `E_eff = 70` keV | `-111.69` |
 | `HU_p` | protein endpoint at `E_eff = 70` keV | `+270.58` |
@@ -51,12 +51,10 @@ two groups (healthy, diseased) — the numbers written into
   overshoots the clinical curve by about `18` HU at `r = 1–2` mm.
 - **A4.** `μ` is volume-additive and water is the HU zero, so HU is **exactly** barycentric in the
   volume fractions. This is not an approximation.
-- **A5.** The protein-to-water ratio `ρ_i` is the same in the tissue domain as in the clinical
-  domain. Frozen **per layer**, at that layer's own clinical value — `ρ` is *not* claimed to be a
-  constant of adipose tissue, and it is not: under the prior it runs `0.104 → 0.088` across the
-  twenty layers, and `0.123 → 0.087` across `-70 → -90` HU. The assumption is only that the
-  `0.6–2.1` HU clinical-to-tissue shift does not move it. That is false at the `1.5–7 %` level and
-  the resulting error is priced in §17a. It is an empirical shortcut, not a physical law.
+- **A5.** Adipose composition at a given HU is distributed as the Woodard-1986 cloud. This is the
+  only closure — it is a measured statement about adipose tissue, and it is applied **once**, to the
+  tissue HU. Nothing is computed in the clinical composition domain and nothing is carried between
+  domains.
 - **A6.** `s_i` is the standard error of the **mean over a cohort of >100 patients**, not a
   single-patient standard deviation. Weighting by `1/s_i²` therefore fits the *cohort mean curve*,
   which is the right target for a phantom of "the average patient" — but the per-patient standard
@@ -198,7 +196,8 @@ HU *rises* from `d = 2` to `d = 4` (healthy) and from `d = 2` to `d = 3` (diseas
 residual is deposited at `d = 2`. Two consequences:
 
 - The near-wall layers are where the model is least trustworthy — and they are also where the
-  frozen-`ρ` closure costs the most (§17a), for the same reason: both errors scale with `ΔH`.
+  prior is pulled furthest from the clinical answer (§16), for the same reason: both scale with
+  `ΔH = H_i - y_i`.
 - Whether the bump is real physiology or digitization is not decidable from these data. It is
   `~1` HU on a cohort mean whose per-patient spread is `10–18` HU (A6). Treating it as signal would
   require a fourth parameter that twenty correlated points cannot support.
@@ -209,7 +208,7 @@ residual is deposited at `d = 2`. Two consequences:
 means the error bars are too large. Three hypotheses were tested; only the third survives.
 
 **H1 — the stated `s_i` are too large; use the digitization precision instead.** Rejected, and the
-sign is backwards. The digitization precision (`±0.25` HU, §16) is the error in *reading the bar off
+sign is backwards. The digitization precision (`±0.25` HU, §15) is the error in *reading the bar off
 the figure*; it adds in quadrature to the statistical error rather than replacing it, so the honest
 `s_i` is *larger*, and `χ²_ν` would fall further. Forcing `s_i = 0.25` HU uniformly gives
 `χ²_ν = 7.81 / 14.82` and drags `τ` from `22.5 → 29.5` mm and `47.0 → 98.0` mm. A `98` mm decay
@@ -310,48 +309,57 @@ The prior-free bound on protein follows by setting `f_w = 0`:
 
 $$f_p^{\max} \;=\; \frac{H - \mathrm{HU}_l}{\mathrm{HU}_p - \mathrm{HU}_l}$$
 
-## §13. Closure by the frozen protein-to-water ratio
+## §13. Closure by the adipose prior, applied to the tissue HU
 
-Impose A5: `f_p = ρ f_w`, hence `f_l = 1 - f_w - f_p = 1 - f_w(1+ρ)`. Substituting into §12:
+The missing degree of freedom is supplied by the measured Woodard-1986 adipose cloud. Let
+`{(f_w, f_l, f_p)^(k)}` be `K = 200,000` draws from it (stratified sampler, seed `20260727`), each
+with its own barycentric HU from §12:
 
-$$H \;=\; \big[1 - f_w(1+\rho)\big]\mathrm{HU}_l + \rho f_w \mathrm{HU}_p$$
+$$\mathrm{HU}^{(k)} \;=\; f_l^{(k)}\,\mathrm{HU}_l \;+\; f_p^{(k)}\,\mathrm{HU}_p$$
 
-$$H - \mathrm{HU}_l \;=\; f_w\big[\rho\,\mathrm{HU}_p - (1+\rho)\,\mathrm{HU}_l\big]$$
+Importance-weight the cloud by a Gaussian likelihood centred on the **tissue** HU `H_i`, with that
+layer's own standard error of the mean as the width:
 
-$$\boxed{\;f_w \;=\; \frac{H - \mathrm{HU}_l}{\rho\,\mathrm{HU}_p - (1+\rho)\,\mathrm{HU}_l}, \qquad f_p = \rho f_w, \qquad f_l = 1 - f_w - f_p \;}$$
+$$w^{(k)} \;\propto\; \exp\!\left[-\tfrac{1}{2}\left(\frac{\mathrm{HU}^{(k)} - H_i}{s_i}\right)^{\!2}\right], \qquad \sum_k w^{(k)} = 1$$
 
-With `HU_l = -111.69` and `HU_p = +270.58` the denominator is `270.58 ρ + 111.69 (1+ρ)`.
+$$\boxed{\;\big(f_w,\, f_l,\, f_p\big)_i \;=\; \sum_k w^{(k)}\,\big(f_w,\, f_l,\, f_p\big)^{(k)}\;}$$
 
-**Self-consistency check built into the script:** feeding the *clinical* `H` back through this
-formula must return the clinical CSV's own fractions. It does, to `Δ ≤ 0.0011`.
+The effective sample size
 
-## §14. Worked example — healthy, `d = 1` mm, by hand
+$$\mathrm{ESS}_i \;=\; \Big(\sum_k \big(w^{(k)}\big)^2\Big)^{-1}$$
 
-Clinical composition at this layer is `(f_w, f_l, f_p) = (0.2394, 0.7357, 0.0249)`, so
+is printed per layer: `19{,}000 – 34{,}000` of the `200{,}000` draws, so the posterior is well
+resolved and is not riding on a handful of samples.
 
-$$\rho = \frac{0.0249}{0.2394} = 0.10401$$
+**This is the only place a composition is ever computed.** There is no algebraic HU-to-fractions
+inversion left in the pipeline, and no closure parameter to freeze.
 
-The fitted tissue HU from §10, with `A = -98.638`, `B = 24.989`, `τ = 22.5` mm:
+## §14. What can still be checked by hand
 
-$$H \;=\; -98.638 + 24.989 \times e^{-1/22.5} \;=\; -98.638 + 24.989 \times 0.956529 \;=\; -98.638 + 23.902 \;=\; -74.736$$
+The posterior mean is not a hand calculation, but two things about it are.
 
-Denominator:
+**(a) HU consistency.** A weighted mean of compositions need *not* carry the HU it was weighted
+toward — the cloud is asymmetric about the likelihood centre. Take healthy `d = 1` mm, where §10
+gives
 
-$$0.10401 \times 270.58 \;+\; 1.10401 \times 111.69 \;=\; 28.145 + 123.307 \;=\; 151.452$$
+$$H \;=\; -98.638 + 24.989\,e^{-1/22.5} \;=\; -98.638 + 24.989 \times 0.956529 \;=\; -74.736$$
 
-Numerator:
+and the delivered row is `healthy,1,0.2425,0.7319,0.0256`. Its own barycentric HU is
 
-$$-74.736 - (-111.69) \;=\; 36.954$$
+$$0.7319 \times (-111.695) \;+\; 0.0256 \times 270.583 \;=\; -81.750 + 6.927 \;=\; -74.823$$
 
-Therefore
+so it sits `0.087` HU off its own isoline. The script reports the worst case over all forty rows:
+**`0.148` HU**. That is the honest size of the posterior-mean artifact, and it is measured, not
+assumed away.
 
-$$f_w = \frac{36.954}{151.452} = 0.24399, \qquad f_p = 0.10401 \times 0.24399 = 0.02538, \qquad f_l = 1 - 0.24399 - 0.02538 = 0.73063$$
+**(b) The physical ceiling.** From §12, `f_p` cannot exceed
 
-The CSV row reads `healthy,1,0.2440,0.7306,0.0254`. Agreement to the printed digits.
+$$f_p^{\max} \;=\; \frac{H - \mathrm{HU}_l}{\mathrm{HU}_p - \mathrm{HU}_l} \;=\; \frac{-74.736 + 111.695}{382.278} \;=\; \frac{36.959}{382.278} \;=\; 0.0967$$
 
----
+The delivered `f_p = 0.0256` is `26 %` of that prior-free bound — comfortably interior, which is what
+you want: the prior is choosing a point, not being clipped by the simplex wall.
 
-## §16. What `s_i` actually is
+## §15. What `s_i` actually is
 
 `s_i` is **the half-length of the error bar drawn on the published Oxford figure, read off by eye**.
 It lives in `wl-noise-aware-mmd/data/oxford_fai_gradient.csv`, columns
@@ -379,115 +387,70 @@ Three facts follow, all of which matter downstream:
 `(A, B, τ)` at all — only the reported `χ²`. Only the *relative* profile of `s_i` across layers has
 any effect on the phantom.
 
-## §17. Where this file sits — the pipeline is prior-first
+## §16. Where this file sits — the pipeline in full
 
-The order of operations is **not** "fit HU, then look up the composition". It cannot be: §12 shows a
-single 120 kVp measurement leaves one degree of freedom open, so HU alone never determines a
-composition. Something must supply that degree of freedom, and here it is the adipose prior —
-consulted **upstream, in the clinical domain**, before any fitting happens.
+The order is **not** "fit HU, then look up the composition". It cannot be: §12 shows a single
+120 kVp measurement leaves one degree of freedom open, so HU alone never determines a composition.
+Something must supply it. But the fit itself lives entirely in HU space and never touches a
+composition — so the fit goes **first**, and the prior is applied **once**, to the HU we believe:
 
-    1.  clinical HU  +  Woodard-1986 adipose prior            [examples/oxford_wlp_composition.jl]
-        importance sampling, 200k draws
-             -->  posterior (f_w, f_l, f_p) per layer          [oxford_wlp_composition.csv]
+    1.  chi-square fit of the exponential to the CLINICAL HU    [this file, §3-§10]
+             -->  tissue HU  H_i        <-- pure HU space, no composition anywhere
 
-    2.  keep ONLY the ratio                                    [this file, §13 / A5]
-             rho_i = f_p / f_w        <-- the prior's whole contribution, frozen
-
-    3.  chi-square fit of the exponential to the CLINICAL HU   [this file, §3-§10]
-             -->  tissue HU  H_i       <-- runs in HU space alone, never sees a composition
-
-    4.  H_i  +  frozen rho_i  -->  new (f_w, f_l, f_p)         [this file, §13]
+    2.  Woodard-1986 adipose prior, importance-weighted at H_i  [this file, §13]
+             -->  (f_w, f_l, f_p) per layer
              -->  oxford_deconvolved_composition.csv
 
-So a composition is computed **twice**: once by the prior on the clinical HU, once algebraically on
-the tissue HU. Steps 3 and 4 are decoupled — the fit is pure HU, and the composition re-enters only
-through the single scalar `ρ_i`.
+Two steps, one prior evaluation, no closure parameter. A composition is computed exactly once, in
+the tissue domain, and nothing is ever transported between domains.
 
-**The design choice this hides.** The prior is *not* re-run on the tissue HU. Only `ρ` is
-transplanted from the clinical domain to the tissue domain, which is assumption A5.
-`pcat_deconv_design.jl` deliberately does not re-sample (see its header: "That sampler is not
-reproduced here").
+**What the assumptions now are.** Only two do real work, and both are physical statements about
+tissue:
 
-### §17a. The geometry of step 4, and what A5 costs
+- **A2** — the tissue-domain gradient is smooth and monotone, a diffusion-like lipid gradient away
+  from the vessel. This is what makes three parameters enough.
+- **A5** — adipose composition at a given HU is distributed as the measured Woodard-1986 cloud.
+  This is what closes the missing degree of freedom.
 
-Work in `(f_w, f_p)` coordinates — an affine image of the composition triangle, with `f_l` recovered
-from closure. Both constraints stay straight lines:
+No third assumption is doing quiet work.
 
-$$\text{HU:}\quad f_w \;=\; 1 + \frac{H}{111.695} \;-\; 3.42256\,f_p, \qquad\qquad \text{ratio:}\quad f_p \;=\; \rho\, f_w$$
+**Reproducibility note.** Revisions of this script before 2026-07-29 computed the composition in the
+clinical domain and carried a ratio across to the tissue domain. Any `oxford_deconvolved_composition.csv`
+from before that date differs from the current one by up to `0.267` pp (healthy) and `0.613` pp
+(diseased), both at `d = 2` mm, converging to under `0.1` pp beyond `d ≈ 5` mm. The difference scales
+with `ΔH = H_i - y_i`, so it is largest exactly where the monotone model cuts across the clinical
+curve's non-monotone bump (§9).
 
-The ratio line passes through the origin `(f_w, f_p) = (0,0)`, which is the **pure-lipid vertex**.
-So step 4 is: *intersect the tissue HU isoline with a ray from the pure-lipid vertex whose slope is
-the frozen `ρ`.* Freezing `ρ` is geometrically the statement that the clinical→tissue move is
-constrained to slide **along that ray**; re-running the prior would let it leave the ray, and the
-cost of A5 is exactly the off-ray component.
+**Cost of the reorder.** `pcat_deconv_design.jl` now `include`s the adipose sampler from
+`wl-noise-aware-mmd/src/` — the sampler's canonical home, included rather than copied, so exactly one
+implementation of it continues to exist. In exchange the script **no longer reads the SMB share at
+all**: its inputs are now the local `oxford_fai_gradient.csv` and this repository's own
+`pcat_radial_profile.csv`.
 
-**Measured cost** — same sampler, same seed (`adipose_sample_comps(200_000; seed = 20260727)`),
-likelihood re-centred on `H_i` with the same `s_i`:
+### §16a. The geometry, in `(f_w, f_p)`
 
-| arm | max `|Δρ|/ρ` | max `|Δf|` | where | beyond `d ≈ 5` mm |
-|---|---|---|---|---|
-| healthy | 3.32 % | **0.26 pp** | `d = 2` mm | `< 0.1` pp |
-| diseased | 7.09 % | **0.63 pp** | `d = 2` mm | `< 0.1` pp |
+Work in `(f_w, f_p)` — an affine image of the composition triangle, with `f_l` recovered from
+closure, so straight lines stay straight. The HU constraint of §12 becomes
 
-The error concentrates at small `d` because `ρ` is a smooth function of HU under the prior
-(`dlnρ/dHU ≈ 2–3 %/HU`), so freezing it costs `(dlnρ/dHU) × ΔH` — and `ΔH` is largest exactly where
-the exponential model misfits, at `d = 2` mm (§9, residual `1.60 / 2.08` HU).
+$$f_w \;=\; 1 + \frac{H}{111.695} \;-\; 3.42256\,f_p$$
 
-### §17b. Why freeze the *ratio* — the honest answer
+a segment from `(1 + H/111.695, 0)` to `(0, f_p_max)`. Every point on it reproduces `H` exactly;
+that segment **is** the degree of freedom a single energy leaves open. The prior is a density over
+the same plane, and §13 returns its mean under a likelihood concentrated on the segment — a point
+pulled toward wherever the adipose cloud is thickest, not a point picked by a geometric rule.
 
-The objection is correct: `f_p/f_w` is not fixed in real adipose tissue, and the prior says so
-loudly. Across the HU range of interest:
+The origin `(f_w, f_p) = (0, 0)` is the pure-lipid vertex, which is why a constant-ratio rule would
+be a ray from it. Nothing in the current pipeline uses such a ray.
 
-| HU | `ρ = f_p/f_w` | `f_p` |
-|---|---|---|
-| -70 | 0.12323 | 0.03228 |
-| -80 | 0.09580 | 0.02047 |
-| -90 | 0.08720 | 0.01310 |
-
-`ρ` falls `29 %` over that span. **The justification originally written into the script — that
-freezing `ρ` "perturbs along the prior's own locus" — is a non-sequitur** and has been removed.
-Reproducing the clinical point at `ΔH = 0` says nothing about the *direction* of motion for
-`ΔH ≠ 0`. The frozen-`ρ` direction is a ray from the pure-lipid vertex; if the prior's locus were
-that ray, `ρ` would be constant along it, and the table above shows it is not.
-
-**The real justification is empirical.** Every closure is a choice of which coordinate to hold while
-sliding to the new isoline. Scored against a full prior re-run — the fully consistent answer — as
-the maximum deviation over all twenty layers, in percentage points:
-
-| rule | healthy | diseased |
-|---|---|---|
-| freeze `f_p/f_w` (shipped) | **0.26** | **0.63** |
-| freeze `f_p` | 0.64 | 1.19 |
-| freeze `f_p/f_l` | 0.80 | 1.51 |
-| skip step 4 entirely | 1.00 | 1.11 |
-
-Freezing the ratio wins by `2.4×` over the next best rule. The geometric reason is visible in
-`(f_w, f_p)`: the prior's locus runs from `(0.150, 0.0131)` at `-90` HU to `(0.262, 0.0323)` at
-`-70` HU, slope `0.172`. A constant-`f_p` rule is a horizontal line (slope `0`); constant-`ρ` is a
-ray from the origin of slope `≈ 0.11`. The locus is nearer the ray than the horizontal — `ρ` is
-simply the slowest-varying of the candidates (`-29 %` against `f_p`'s `-59 %`), so it absorbs most
-of the HU dependence. Nearer, but not equal: that residual tilt *is* the `0.26 / 0.63` pp.
-
-**Verdict: keep A5, drop the physical claim.** `0.63` pp sits below the `1.8–2.8` pp working accuracy
-of the downstream decode, and removing it would mean pulling `wl-noise-aware-mmd`'s sampler into this
-repository. But it must be documented as the best of several arbitrary rules, not as physics — if the
-downstream accuracy ever reaches `0.5` pp, re-running the prior is the correct fix, not a better
-ratio.
-
-⚠️ **The §13 closure check does not test A5.** The `ρ` ray is drawn *through* the clinical posterior
-mean, so verifying that feeding the clinical `H` back reproduces the prior's own fractions to
-`Δ ≤ 0.0011` only confirms that the posterior mean lies on its own HU isoline. That is a real check
-— a weighted posterior mean need not be HU-consistent, and here it is off by `0.086` HU — but it is
-silent about transplanting `ρ` across domains. Only the re-run above prices that.
-
-## §15. Provenance
+## §17. Provenance
 
 This procedure is **not** taken from a published method. It is a design step written for this
 phantom: the parametric-forward-model-instead-of-inverse-filter idea is standard practice in
-ill-posed inversion, but the specific three-parameter profile, the frozen-ratio closure (A5) and
-the self-consistency criterion in §0 are local choices made in `pcat_deconv_design.jl`.
+ill-posed inversion, but the specific three-parameter profile (A2) and the self-consistency
+criterion of §0 are local choices made in `pcat_deconv_design.jl`.
 
 The *inputs* have sources — the clinical FAI gradient is Oxford-style perivascular HU versus
 distance, the endpoints come from NIST triglyceride and Woodard & White 1986 protein, and the
-adipose prior that produced the upstream `ρ` is the digitised Woodard 1986 Fig. 1 distribution.
-The *inversion procedure in this file* has no citation, and should not be given one.
+adipose prior (A5) is the digitised Woodard 1986 Fig. 1 distribution, sampled by
+`wl-noise-aware-mmd/src/wlp_adipose_sampler.jl`. The *inversion procedure in this file* has no
+citation, and should not be given one.
