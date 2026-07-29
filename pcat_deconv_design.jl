@@ -205,22 +205,23 @@ CM.lines!(ax1, collect(σs), costs; linewidth = 2.5, color = :black)
 CM.vlines!(ax1, σ̂; color = :red, linestyle = :dash)
 CM.text!(ax1, σ̂ + 0.05, maximum(costs)*0.85;
     text = "sigma = $(round(σ̂,digits=3)) mm\nFWHM = $(round(fwhm,digits=2)) mm", fontsize = 13)
-ax2 = CM.Axis(fig[1,2]; title = "Oxford profile: clinical vs deconvolved tissue domain",
+ax2 = CM.Axis(fig[1,2]; title = "Oxford profile: clinical vs exponential decay fitting",
     titlesize = 16, xlabel = "radial distance from the wall (mm)", ylabel = "HU")
 const RF = collect(-6.0:0.1:30.0)
 for (g, col) in (("healthy", CM.RGBf(.20,.45,.80)), ("diseased", CM.RGBf(.85,.20,.18)))
     p = oxford[g]; d = Float64[x[1] for x in p]; hu = Float64[x[2] for x in p]
     pars = fitpars[g]
-    # solid = the clinical curve; dashed = the tissue profile that produces it; dots = that same
-    # tissue profile blurred once, which must land back on the solid line or the fit is wrong.
-    CM.lines!(ax2, d, hu; color = col, linewidth = 2.5, label = "$g — clinical (blurred)")
+    CM.lines!(ax2, d, hu; color = col, linewidth = 2.5, label = "$g — clinical")
     CM.lines!(ax2, d, tissue_model(d, pars); color = col, linewidth = 2,
-              linestyle = :dash, label = "$g — recovered tissue")
+              linestyle = :dash, label = "$g — exponential decay fitting")
+    # The re-blurred curve is no longer drawn: it lands on the dashed line to within 0.03 HU, so it
+    # was ink, not information. The closure claim it carried is kept as a printed number instead.
     bf = blur1d(tissue_model(RF, pars), RF, σ̂)
-    CM.scatter!(ax2, d, [bf[argmin(abs.(RF .- di))] for di in d];
-                color = (col, 0.5), markersize = 7, label = "$g — re-blurred check")
+    rb = [bf[argmin(abs.(RF .- di))] for di in d]
+    @printf("re-blur closure %-9s max|re-blurred - clinical| = %.2f HU, max|re-blurred - fit| = %.3f HU\n",
+            g, maximum(abs.(rb .- hu)), maximum(abs.(rb .- tissue_model(d, pars))))
 end
-CM.axislegend(ax2; position = :rb, framevisible = false, labelsize = 11)
+CM.Legend(fig[2, 1:2], ax2; orientation = :horizontal, framevisible = false, labelsize = 12)
 CM.save(joinpath(OUT, "pcat_deconv_design.png"), fig;
         px_per_unit = min(2.0, 2000 / maximum(fig.scene.viewport[].widths)))
 println("figure -> ", joinpath(OUT, "pcat_deconv_design.png"))
