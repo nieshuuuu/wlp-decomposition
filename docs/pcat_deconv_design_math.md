@@ -169,14 +169,16 @@ $$\hat\tau \;=\; \arg\min_{\tau \,\in\, \{0.5,\,1.0,\,\dots,\,120.0\}} \; \chi^2
 then **assert** `0.5 < τ̂ < 120.0`. A fit sitting on either end of the grid is a boundary solution
 and must not reach the phantom silently — that is precisely how the old `A = -110.0` hid.
 
-The reported goodness of fit is the weighted root-mean-square residual in units of the standard
-error of the mean:
+The reported goodness of fit is the **reduced chi-square** — the minimised `χ²` per degree of
+freedom, with `p = 3` parameters spent (`A`, `B`, `τ`):
 
-$$\bar\chi \;=\; \sqrt{\chi^2_{\min} / N}, \qquad N = 20$$
+$$\chi^2_\nu \;=\; \frac{\chi^2_{\min}}{\nu}, \qquad \nu = N - p = 20 - 3 = 17$$
 
-Fitted values: healthy `(A, B, τ) = (-98.638, 24.989, 22.50)` with `χ̄ = 0.467`;
-diseased `(-127.639, 60.555, 47.00)` with `χ̄ = 0.764`. **`χ̄ < 1` means the three-parameter model
-fits the twenty points to inside their error bars** — the model is smoothing, not straining.
+Fitted values: healthy `(A, B, τ) = (-98.638, 24.989, 22.50)`, `χ² = 4.36`, `χ²_ν = 0.26`;
+diseased `(-127.639, 60.555, 47.00)`, `χ² = 11.68`, `χ²_ν = 0.69`. **`χ²_ν < 1` means the
+three-parameter model fits the twenty points to inside their error bars** — the model is smoothing,
+not straining. `fit_tissue` returns the raw `χ²_min` and the caller divides by its own `ν`, so the
+convention lives in one place and is visible where it is used.
 
 The script also asserts the defining property of the solution — that the weighted residual is
 orthogonal to both columns of the design matrix:
