@@ -15,7 +15,8 @@ using Unitful: @u_str
 using Printf: @printf
 
 const OUT = joinpath(@__DIR__, "pcat_ct")
-const ACQ = get(ENV, "PCAT_ACQ", "pcat_acq_tissue.jls")
+const ACQ = get(ENV, "PCAT_ACQ", "pcat_acq_shell.jls")   # match every other downstream script;
+                                                         # the old default silently read a stale acq
 const D = deserialize(joinpath(OUT, ACQ))
 const K, VOXMM = 6, 0.5
 const VESSELS = ["rca1", "rca2", "lad1", "lad2", "lad3", "lcx"]
