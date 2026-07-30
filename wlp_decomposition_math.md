@@ -23,12 +23,10 @@ different failure modes and each estimator answers one of them:
 A voxel whose noisy decode lands *outside* the composition triangle is handled by a noise-ellipse
 maximum-likelihood projection (§5.3), applied at the pooled-ROI level.
 
-Same forward model feeds all three; §6 validates them against truth; §7 explains the 70/150 keV
-choice; §8 states plainly what the code does **not** do and where the numbers stop transferring.
 
 > **Reproducibility gate.** The recon must be quantitative before any decode is trustworthy: on
 > the 52 calibration ROIs the reconstructed HU matches the theoretical linear-mixture HU to a mean
-> of **−2.3 HU at 70 keV** and **+0.5 HU at 150 keV** (|max| < 5 HU; §2.5). This requires
+> of **−2.3 HU at 70 keV** and **+0.5 HU at 150 keV** (|max| < 5 HU; see (5), §2.5). This requires
 > BasisSimulator **v0.8.0 with the `:dd_fast` projector**, a **wide bowtie-free geometry** (1300
 > detector columns ≈ 415 mm scan FOV, `bowtie=:none`) so the 350 mm fat ring is not truncated,
 > and **984 views** to suppress aliasing. (Scanner: source-to-isocenter 625.6 mm, source-to-detector
@@ -46,13 +44,13 @@ scanner unchanged — §8 is explicit about that. The five:
 
 1. **endpoints** $p_w, p_l, p_p$ — where pure water, lipid, and protein sit in the
    $(\mathrm{HU}_{70},\mathrm{HU}_{150})$ plane. Water is $ (0,0) $ by the HU definition; lipid and
-   protein are **theoretical** (NIST cross-sections, §2.2), because no real scan supplies a pure
+   protein are **theoretical** (NIST cross-sections; see (4), §2.2), because no real scan supplies a pure
    lipid or pure collagen rod.
 2. **calibration surfaces** $c_w, c_l, c_p$ — the coefficients of three quadratics in
-   $(\mathrm{HU}_{70},\mathrm{HU}_{150})$, fit by least squares on known mixtures (§5.1).
+   $(\mathrm{HU}_{70},\mathrm{HU}_{150})$, fit by least squares on known mixtures; see (9), §5.1.
 3. **noise model** $\sigma_E(\mathrm{HU})$ per energy — a convex quadratic, degenerating to
-   near-constant over the soft-tissue range actually sampled (§5.2).
-4. **inter-energy correlation** $\rho$ — measured from the paired within-ROI residuals (§5.2).
+   near-constant over the soft-tissue range actually sampled; see (11), §5.2.
+4. **inter-energy correlation** $\rho$ — measured from the paired within-ROI residuals; see (12), §5.2.
 5. **decode-to-map regulariser** — the $\sigma_f$ weight and the Huber-TV $(\lambda,\varepsilon)$
    that turn the speckled per-voxel decode into a map (§5.4).
 
@@ -72,6 +70,7 @@ $$
 m_v = \frac{f_v\,\rho_v}{\rho_{\text{eff}}}\ \ (\text{mass fraction}),
 \qquad
 w_Z = \sum_v m_v\,w_{Z}^{(v)} ,
+\qquad\qquad (1)
 $$
 
 where $w_Z^{(v)}$ is element $Z$'s mass fraction in pure material $v$. Densities used:
@@ -83,11 +82,14 @@ This is not an approximation. The linear attenuation of the effective material t
 the volume-weighted sum of the pure linear attenuations, at **every** photon energy:
 
 $$
+\begin{aligned}
 \mu_{\text{eff}}(E)
-= \rho_{\text{eff}} \sum_Z w_Z \Big(\tfrac{\mu}{\rho}\Big)_Z(E)
-= \rho_{\text{eff}} \sum_v m_v \sum_Z w_Z^{(v)} \Big(\tfrac{\mu}{\rho}\Big)_Z(E)
-= \sum_v f_v\,\rho_v \Big(\tfrac{\mu}{\rho}\Big)_v(E)
+&= \rho_{\text{eff}} \sum_Z w_Z \Big(\tfrac{\mu}{\rho}\Big)_Z(E)
+= \rho_{\text{eff}} \sum_v m_v \sum_Z w_Z^{(v)} \Big(\tfrac{\mu}{\rho}\Big)_Z(E) \\[2pt]
+&= \sum_v f_v\,\rho_v \Big(\tfrac{\mu}{\rho}\Big)_v(E)
 = \sum_v f_v\,\mu_v(E) .
+\qquad\qquad (2)
+\end{aligned}
 $$
 
 The middle step uses $\rho_{\text{eff}} m_v = f_v \rho_v$; the last uses
@@ -103,13 +105,14 @@ $$
 \mathrm{HU}_{\text{mix}}(E) = 1000\,\frac{\mu_{\text{eff}}(E) - \mu_w(E)}{\mu_w(E)} .
 $$
 
-Substitute §2.1's sum and use closure $f_w + f_l + f_p = 1$ to eliminate $f_w$:
+Substitute the sum of (2) and use closure $f_w + f_l + f_p = 1$ to eliminate $f_w$:
 
 $$
 \mu_{\text{eff}} - \mu_w
 = f_l(\mu_l - \mu_w) + f_p(\mu_p - \mu_w)
 \quad\Longrightarrow\quad
 \boxed{\ \mathrm{HU}_{\text{mix}}(E) = f_l\,p_l(E) + f_p\,p_p(E)\ }
+\qquad\qquad (3)
 $$
 
 with the **theoretical endpoints**
@@ -117,6 +120,7 @@ with the **theoretical endpoints**
 $$
 p_i(E) = 1000\,\frac{\mu_i(E) - \mu_w(E)}{\mu_w(E)} ,
 \qquad p_w(E) \equiv 0 .
+\qquad\qquad (4)
 $$
 
 So a mixture lands at the barycentric combination $f_w\,p_w + f_l\,p_l + f_p\,p_p$ of the three
@@ -185,7 +189,7 @@ the HU/σ measurements.
 
 ### 2.5 Forward fidelity — recon vs theory
 
-Because §2.1–2.2 predict the mixture HU exactly, the simulator is falsifiable: the reconstructed
+Because (2)–(3) predict the mixture HU exactly, the simulator is falsifiable: the reconstructed
 ROI-mean HU of each known-composition insert must equal $f_l p_l(E) + f_p p_p(E)$. Across all 52
 calibration cores:
 
@@ -195,6 +199,7 @@ $$
 70\ \text{keV}: & -2.26 \pm 1.16\ \mathrm{HU},\ |\text{max}| = 4.8 \\
 150\ \text{keV}: & +0.51 \pm 1.76\ \mathrm{HU},\ |\text{max}| = 3.7
 \end{cases}
+\qquad\qquad (5)
 $$
 
 A residual bias of a couple of HU at 70 keV (mild beam-hardening / basis-synthesis offset) and
@@ -216,6 +221,7 @@ m - p_w = G\,\theta + \varepsilon ,
 \qquad
 G = \big[\,p_l - p_w \ \big|\ p_p - p_w\,\big]
 = \begin{pmatrix} p_l(70) & p_p(70) \\ p_l(150) & p_p(150) \end{pmatrix} ,
+\qquad\qquad (6)
 $$
 
 is a **square** $2\times2$ system: exactly determined, no spare equation. There is no residual to
@@ -231,6 +237,7 @@ $$
 G = \begin{pmatrix} -111.7 & 270.6 \\ -81.2 & 290.1 \end{pmatrix} ,
 \qquad
 \operatorname{cond}(G) = 16.9 .
+\qquad\qquad (7)
 $$
 
 The three tissues are all low-$Z$ and near-water, so their vertices are nearly collinear — the
@@ -294,12 +301,13 @@ narrow spread.
 
 The exact inverse would be $\theta = G^{-1}(m - p_w)$ using the theoretical endpoints. The notebook
 does **not** do that. Instead it fits an empirical map from measured HU straight to each fraction,
-which absorbs the residual beam-hardening / basis offset of §2.5 without a separate debiasing step.
+which absorbs the residual beam-hardening / basis offset of (5) without a separate debiasing step.
 Define the quadratic feature vector
 
 $$
 \phi(\mathrm{HU}_{70},\mathrm{HU}_{150}) =
 \big[\,1,\ \mathrm{HU}_{70},\ \mathrm{HU}_{150},\ \mathrm{HU}_{70}^2,\ \mathrm{HU}_{150}^2,\ \mathrm{HU}_{70}\mathrm{HU}_{150}\,\big] ,
+\qquad\qquad (8)
 $$
 
 and fit three coefficient vectors $c_w, c_l, c_p$ by ordinary least squares against the known
@@ -308,6 +316,7 @@ fractions of the 52 calibration cores:
 $$
 c_i = \arg\min_c \sum_{k=1}^{52}\big(c^{\mathsf T}\phi(m_k) - f_{i,k}\big)^2 ,
 \qquad i \in \{w, l, p\} .
+\qquad\qquad (9)
 $$
 
 The three surfaces are fit **independently**, so a raw evaluation need not sum to one; the decode
@@ -317,6 +326,7 @@ $$
 (\tilde f_w, \tilde f_l, \tilde f_p) = \big(c_w^{\mathsf T}\phi,\ c_l^{\mathsf T}\phi,\ c_p^{\mathsf T}\phi\big),
 \qquad
 \hat f_i = \frac{\tilde f_i}{\tilde f_w + \tilde f_l + \tilde f_p} .
+\qquad\qquad (10)
 $$
 
 Fitted coefficients (canonical pair; $\mathrm{HU}$ in units of HU):
@@ -353,7 +363,7 @@ $$
 The raw surfaces already sum to 1.00000 here, so normalisation is a null correction — the three
 independent fits are jointly consistent on real test data. The decode lands within 0.019 of truth
 on every fraction. (Cross-check: this true composition sits at theoretical HU
-$f_l p_l + f_p p_p = (-20.05,\ -0.41)$, within the §2.5 recon residual of the measured
+$f_l p_l + f_p p_p = (-20.05,\ -0.41)$, within the recon residual (5) of the measured
 $(-21.29, 0.47)$ — the loop closes.)
 
 ### 5.2 The noise model
@@ -364,6 +374,7 @@ out negative:
 
 $$
 \sigma_E(\mathrm{HU}) = a_E\,\mathrm{HU}^2 + b_E\,\mathrm{HU} + c_E ,\qquad a_E \ge 0 .
+\qquad\qquad (11)
 $$
 
 Over the soft-tissue HU range actually sampled (roughly −85 to +60 HU) the fit is essentially flat:
@@ -374,7 +385,7 @@ $$
 \sigma_{150}(\mathrm{HU}) \approx 2.2\ \mathrm{HU}\ \ (a=3.5\!\times\!10^{-5},\ b\approx0,\ c=2.23) .
 $$
 
-These are the quadratic-fit intercepts used for the per-voxel σ_f weighting in the map step (§5.4).
+These are the quadratic-fit intercepts used for the per-voxel σ_f weighting in the map step; see (16), §5.4.
 The out-of-triangle **noise ellipse** in §5.3 instead uses the pooled within-ROI residual covariance
 directly — its standard deviations are $\sigma_{70}=9.7$ and $\sigma_{150}=2.3$ HU, matching the
 intercepts above to within rounding (pooled $\sigma_{150}=2.27$ vs fitted $2.23$).
@@ -387,6 +398,7 @@ noise co-fluctuates; the inter-energy correlation from the pooled centred within
 $$
 \rho = \frac{\sum_i \delta_{70,i}\,\delta_{150,i}}
             {\sqrt{\sum_i \delta_{70,i}^2}\,\sqrt{\sum_i \delta_{150,i}^2}} = 0.787 .
+\qquad\qquad (12)
 $$
 
 This defines the per-voxel noise covariance
@@ -394,22 +406,20 @@ This defines the per-voxel noise covariance
 $$
 \Sigma = \begin{pmatrix} \sigma_{70}^2 & \rho\,\sigma_{70}\sigma_{150} \\
 \rho\,\sigma_{70}\sigma_{150} & \sigma_{150}^2 \end{pmatrix} ,
+\qquad\qquad (13)
 $$
 
-which the map step (§5.4) propagates into a per-voxel fraction uncertainty, and which also defines
+which the map step propagates through (16), §5.4, into a per-voxel fraction uncertainty, and which also defines
 the metric for the out-of-triangle handling next.
 
-![The noise model is measured, not assumed. Left: the per-rod standard deviation σ(HU) at each VMI
-energy, with the fitted convex quadratic — σ₇₀ ≈ 9.7 HU is ≈ 4× σ₁₅₀ ≈ 2.2 HU, and both are flat
-in HU over the soft-tissue range, so a single σ per energy is already a good description. Right:
-the joint residual scatter of the two channels, ρ = 0.79 — the two VMIs are synthesized from one
-basis pair, so their noise is shared, and Σ is a tilted ellipse rather than a
-circle.](assets/fig2_noise.png)
+![Left: per-rod σ(HU) at each VMI energy with the fitted convex quadratic — σ₇₀ ≈ 9.7 HU ≈ 4× σ₁₅₀ ≈
+2.2 HU, flat over the soft-tissue range. Right: joint residual scatter of the two channels, ρ = 0.79,
+so Σ is a tilted ellipse.](assets/fig2_noise.png)
 
 ### 5.3 Points outside the triangle — the noise-ellipse MLE
 
-§2.2 says a noiseless mixture lands *inside* the triangle $\{f_w, f_l, f_p \ge 0\}$. A noisy
-measurement need not: the decode of §5.1 divides three independently-fit surfaces by their sum, so
+Equation (3) says a noiseless mixture lands *inside* the triangle $\{f_w, f_l, f_p \ge 0\}$. A noisy
+measurement need not: the decode (10) divides three independently-fit surfaces by their sum, so
 a voxel scattered off the manifold by $\varepsilon$ can produce a **negative** fraction — a
 composition that does not physically exist. This is not rare. On the 129 test ROIs, **27.8 % of
 individual voxels decode to an infeasible composition** ($f_w < 0$ in 16 %, $f_p < 0$ in 7 %,
@@ -418,15 +428,16 @@ these through — the reported fraction is then a linear extrapolation past a ve
 composition.
 
 The principled fix is the same maximum-likelihood step the 2-material water/lipid decode uses, now
-in two dimensions. Under Gaussian noise with covariance $\Sigma$ (§5.2), the log-likelihood of a
+in two dimensions. Under Gaussian noise with covariance $\Sigma$ of (13), the log-likelihood of a
 composition $\theta = (f_l, f_p)$ given a measurement $m = (\mathrm{HU}_{70}, \mathrm{HU}_{150})$ is
 
 $$
 \log \mathcal L(\theta \mid m) = -\tfrac12\,(m - b - G\theta)^{\mathsf T}\,\Sigma^{-1}\,(m - b - G\theta) + \text{const},
+\qquad\qquad (14)
 $$
 
-where $G = [\,p_l - p_w \mid p_p - p_w\,]$ is the endpoint matrix of §3 and $b$ is the calibration
-bias of §2.5 (the mean recon−theory offset, $b = (-2.26,\ +0.51)$ HU). **The maximum-likelihood
+where $G = [\,p_l - p_w \mid p_p - p_w\,]$ is the endpoint matrix of (6) and $b$ is the calibration
+bias of (5) (the mean recon−theory offset, $b = (-2.26,\ +0.51)$ HU). **The maximum-likelihood
 feasible composition is the point on the triangle that minimises the $\Sigma^{-1}$-weighted
 (Mahalanobis) distance to the measurement** — not the Euclidean-closest point. This distinction is
 the whole content of "noise ellipse": because $\sigma_{70} \approx 4\,\sigma_{150}$ and
@@ -438,6 +449,7 @@ $$
 \hat\theta = \arg\min_{\theta \in \triangle}\ (\theta - \theta^\star)^{\mathsf T}\,A\,(\theta - \theta^\star),
 \qquad A = G^{\mathsf T}\Sigma^{-1}G,
 \qquad \theta^\star = G^{-1}(m - b),
+\qquad\qquad (15)
 $$
 
 evaluated in closed form by projecting $\theta^\star$ onto each of the three triangle edges in the
@@ -467,10 +479,6 @@ So the estimator keeps the two domains separate:
   them leaves the concordance unchanged (pooled-feasible CCC $f_w/f_l/f_p = 0.996/0.997/0.998$)
   while guaranteeing every delivered composition is physical.
 
-Figure `fig_decode_triangle_noise.png` shows both halves: the full sliver triangle with the measured
-voxel cloud coloured by feasibility (left), and a zoom on the water–lipid corner where the noise
-ellipse is legible and the 7 out-of-triangle ROI means are projected back onto the edge along the
-Mahalanobis metric (right).
 
 ![The decomposition triangle and the noise-ellipse MLE. Left: the water/lipid/protein endpoints form
 a near-collinear sliver (cond G = 16.9); 27.8 % of per-voxel decodes (purple) fall outside it under
@@ -480,22 +488,21 @@ outside are projected back onto the triangle along the Σ⁻¹ (Mahalanobis) met
 
 ### 5.4 From decode to map — the σ_f-weighted Huber-TV
 
-The per-voxel decode applied straight to an image is unbiased but speckled: the sliver of §3 makes
-each voxel's $(f_l, f_p)$ noisy. There are two honest ways to spend that noise down — average an
-ROI and let $\sqrt N$ work (that is §6's pooled accuracy), or, when the deliverable is a *map*, let
-each voxel borrow strength from its neighbours only where the map is locally flat. The second is
-the delivered map.
+The per-voxel decode is unbiased but speckled — the sliver of §3 makes each voxel's $(f_l, f_p)$
+noisy. When the deliverable is a *map* rather than an ROI mean, each voxel borrows strength from its
+neighbours, but only where the map is locally flat.
 
 **Step 1 — propagate σ into a per-voxel fraction precision.** The decode is a smooth function
 $f(\mathrm{HU}_{70},\mathrm{HU}_{150})$, so first-order error propagation through the surface
 gradients $\partial f_i/\partial\mathrm{HU}_E = c_i^{\mathsf T}\partial_E\phi$ gives each fraction's
-variance under the §5.2 covariance:
+variance under the covariance (13):
 
 $$
 \operatorname{Var}(f_i) =
 \Big(\tfrac{\partial f_i}{\partial\mathrm{HU}_{70}}\Big)^2 \sigma_{70}^2
 + \Big(\tfrac{\partial f_i}{\partial\mathrm{HU}_{150}}\Big)^2 \sigma_{150}^2
 + 2\rho\,\tfrac{\partial f_i}{\partial\mathrm{HU}_{70}}\tfrac{\partial f_i}{\partial\mathrm{HU}_{150}}\sigma_{70}\sigma_{150} ,
+\qquad\qquad (16)
 $$
 
 and the data weight is the inverse total fraction variance,
@@ -515,6 +522,7 @@ $(f_l, f_p)$:
 $$
 \hat f = \arg\min_{f}\ \sum_i w_i\,\lVert f_i - \hat f_i^{\text{decode}}\rVert^2
 \ +\ \lambda \sum_{\langle i,n\rangle} \varphi_\varepsilon\!\big(\lVert f_i - f_n\rVert\big) .
+\qquad\qquad (17)
 $$
 
 The Huber coupling between neighbours is $c_{in} = \lambda/\max(\lVert f_i - f_n\rVert,\ \varepsilon)$
@@ -526,16 +534,18 @@ $$
 f_i \leftarrow \frac{w_i\,\hat f_i^{\text{decode}} + \sum_n c_{in} f_n}{w_i + \sum_n c_{in}} ,
 \qquad
 f_w = 1 - f_l - f_p .
+\qquad\qquad (18)
 $$
 
-Parameters $\lambda = 0.05$, $\varepsilon = 0.04$, 25 sweeps. The map is **boundary-agnostic** by
+Parameters $\lambda = 12.12$ (golden-section on calibration only, `wlp_model_70_150.toml`),
+$\varepsilon = 0.04$, 25 sweeps. The map is **boundary-agnostic** by
 construction — it uses no ground-truth insert boundary, only HU-gated soft tissue
 ($-300 < \mathrm{HU}_{150} < 250$, cutting lung/gas below and bone/mineral above). This is the
 honest map: real pericoronary fat gives you no ground-truth boundary, so a decomposition that
 secretly used one would not transfer. Figures 3–4 contrast it against the ground-truth-pooled map,
 which looks cleaner precisely because it cheats with a boundary you do not have.
 
-**Why the per-pass projection is *Euclidean*, not the §5.3 Mahalanobis metric.** The map's
+**Why the per-pass projection is *Euclidean*, not the Mahalanobis metric of (15).** The map's
 simplex projection is a plain non-negativity clamp, and it is deliberately kept separate from the
 ROI-level MLE of §5.3. Two measured reasons. (i) On this phantom's fat ring the Mahalanobis metric
 is the *wrong* projection: the ring is ICRU-44 adipose, whose true composition
@@ -550,76 +560,107 @@ single mean; on a *per-voxel* map any one-sided clamp already trades ROI accurac
 picture (unclamped ROI $f_l$ CCC $0.992$ → clamped $0.975$, the Jensen effect of §5.3 acting
 pixelwise), and the gentler Euclidean clamp is the safer default.
 
-![The delivered map: per-voxel decode plus σ_f-weighted Huber-TV (λ = 12.12, simplex once),
-boundary-agnostic — only lung and bone are HU-gated out, no material boundary is used anywhere.
-Left to right: the 150 keV VMI, then $f_w$, $f_l$, $f_p$ on a fixed 0–1 scale. The check to make is
-the fat ring: it reads ≈ 0.8 lipid, bright but *not* saturated, which is the correct decomposition
-of ICRU-44 adipose (§2.3) rather than pure triglyceride. Muscle reads high water, and $f_p$ stays
-low and flat everywhere, as the narrow protein range of §6 requires.](assets/fig3_delivered_map.png)
+![The delivered map (λ = 12.12, simplex once), boundary-agnostic: only lung and bone are HU-gated
+out. Left to right: the 150 keV VMI, then $f_w$, $f_l$, $f_p$ on a fixed 0–1 scale. The check is the
+fat ring — it reads ≈ 0.8 lipid, bright but not saturated, which is ICRU-44 adipose (§2.3) rather
+than pure triglyceride.](assets/fig3_delivered_map.png)
 
-![Why the map is scored without a ground-truth boundary. Left: the true rod fractions. Middle: the
-delivered map — per-voxel decode plus σ_f-weighted Huber-TV, which uses no boundary and therefore
-keeps both the real within-rod texture and the partial-volume edges. Right: the same data pooled
-inside the ground-truth rod boundary, which looks far cleaner precisely because it has been handed
-the one thing real pericoronary fat never provides. The middle panel is the honest deliverable; the
-right panel is the number a boundary-aware method would report.](assets/fig4_honest_vs_pooled.png)
+![Left: true rod fractions. Middle: the delivered boundary-free map, which keeps within-rod texture
+and partial-volume edges. Right: the same data pooled inside the ground-truth rod boundary — cleaner
+only because it was handed a boundary real fat never provides.](assets/fig4_honest_vs_pooled.png)
 
 ### 5.5 Integrated-HU — total lipid without a boundary
 
-Point accuracy and the map both estimate a *fraction field*. A different quantity matters for small
-fat objects: the **total lipid** they contain. Partial volume smears a small fat insert's signal
-past its visible edge, so measuring lipid only inside the object's apparent extent under-reports the
-total. A normalised FBP point-spread function conserves the integral, so the lost lipid is recovered
-by integrating over a **generous region** (object + skirt) rather than the object alone — provided
-you subtract a background, because the surrounding muscle is not lipid-free in the affine decode.
+Partial volume smears a small fat object past its visible edge, so lipid counted only inside the
+object's extent is under-reported. A normalised FBP point-spread function conserves the integral, so
+integrating over object + skirt recovers what the edge lost — provided a background is subtracted,
+since muscle does not decode to zero lipid.
 
-The estimator uses the **affine** lipid decode $\hat f_l^{\text{aff}} = c_{l,\text{aff}}^{\mathsf T}[1,\mathrm{HU}_{70},\mathrm{HU}_{150}]$
-(linear, so it commutes with the PSF; $c_{l,\text{aff}} = [0.00962,\ -0.02392,\ 0.02194]$). Fit a
-per-scan quadratic muscle background $b(i,j)$ over a 60 mm muscle annulus (captures cupping), then
+The estimator is four lines of arithmetic on one slice, run on four separate scans with one centred
+insert of $f_l = 0.85$ and radius $r \in \{4, 6, 9, 12\}$ mm.
+
+1. Decode every pixel with the **affine** lipid map
+   $\hat f_l^{\text{aff}} = 0.00962 - 0.02392\,\mathrm{HU}_{70} + 0.02194\,\mathrm{HU}_{150}$
+   (`wlp_decomposition.jl:453`). Affine, not the poly2 surface (10), because only a linear decode
+   commutes with the PSF — that commutation is the entire conservation argument.
+2. Fit a background $b(i,j)$: a 6-term quadratic in pixel offsets from the insert centroid,
+   least-squares over the ~17 000 muscle-labelled pixels within 60 mm (`:812`). Quadratic, so it
+   absorbs FBP cupping. At the centre $b_0 \approx -0.148$ — muscle affine-decodes to about $-15\,\%$
+   lipid, which is why subtracting it is not optional.
+3. Integrate excess lipid over a disk of radius $r_{\text{px}} + m$, sweeping the margin
+   $m = 0 \dots 16$ recon-px (`:816–823`; $1$ px $= 0.742$ mm, so the shipped $m = 8$ px is 5.94 mm):
 
 $$
-\text{lipid area} = \int_{\text{region}} \big(\hat f_l^{\text{aff}}(i,j) - b(i,j)\big)\, dA ,
+\widehat{L}(m) = \sum_{\|x - x_0\| \le r_{\text{px}} + m}
+\big(\hat f_l^{\text{aff}}(x) - b(x)\big)\;\Delta A .
+\qquad\qquad (19)
 $$
 
-evaluated at integration radius = object radius + margin. True excess lipid for a disk of radius $r$
-is $\pi r^2 (f_l^{\text{aff,core}} - b_0)$. Across the size series (true fat fraction $f_l = 0.85$,
-integrated at a fixed +8 px skirt):
+4. Divide by the truth for a disk of radius $r$, $L_{\text{true}} = \pi r^2 (f_l^{\text{aff}} - b_0)$
+   with $f_l^{\text{aff}} = 0.761$ the affine decode of the *theoretical* mixture HU (`:808`).
 
-| object radius | true lipid (mm²) | object-extent (naive) | integrated (+8 px) |
+Both curves in fig 6 are $\widehat{L}(m)/L_{\text{true}}$ from this one expression. "Naive
+object-extent" is $m = 0$ and "integrated" is $m = 8$; they are the same line of code at two
+margins, not two methods, and the left panel is the right panel read off at those two $m$ values.
+
+| object radius | $L_{\text{true}}$ (mm²) | $m=0$ (naive) | $m=8$ (integrated) |
 |---|---|---|---|
-| 4 mm | 46 | 43 (**94 %**) | 54 (118 %) |
+| 4 mm | 46 | 43 (94 %) | 54 (118 %) |
 | 6 mm | 103 | 108 (105 %) | 121 (118 %) |
 | 9 mm | 231 | 247 (107 %) | 272 (117 %) |
 | 12 mm | 410 | 435 (106 %) | 455 (111 %) |
 
-The naive object-extent measure loses **6 %** of a 4 mm fat object (and the loss grows as objects
-shrink toward the PSF width); the fixed-skirt integrated measure over-counts by 11–18 % because the
-skirt is a fixed pixel count, so it captures relatively more background at small radii. Both
-estimators also carry a **−10.5 % composition bias** at $f_l = 0.85$ (the affine decode's
-linearisation error: $\hat f_l^{\text{aff}} = 0.761$ vs the true 0.85), common to both and separable
-from the geometric partial-volume effect. The message of fig 6 is the *shape* — the naive curve
-falls away for small objects while the integrated curve stays roughly flat — not the exact
-percentage, which depends on the skirt rule.
+The shape is the result: the $m=0$ curve falls below unity as the object shrinks toward the PSF
+width, the $m=8$ curve does not. At $r = 12$ mm the gain from $m=0$ to $m=8$ is $+4.8$ pp, which is
+the geometric partial-volume loss almost exactly — perimeter $2\pi r_{\text{px}}$ times $\approx 0.7$ px
+of PSF spread, half of it outside, over area $\pi r_{\text{px}}^2$, is 4.4 %. The skirt is recovering
+real lipid, not over-counting it.
 
-![Conservation of lipid recovers what partial volume hides. Left: recovered/true excess lipid
-against fat-object radius — the naive object-extent measure (red) falls below unity as the object
-shrinks toward the PSF width, because the smeared skirt is outside the segmented extent, while the
-integrated-HU measure (green) stays flat. Right: the same ratio against integration margin; beyond
-≈ 8 recon-px the curve plateaus for every radius, which is what a conserved quantity should do.
-Both measures sit above unity by 11–18 % from the fixed-skirt rule and a common −10.5 % composition
-bias, so the claim here is the *shape*, not the absolute level.](assets/fig6_integrated_hu.png)
+The over-unity *level* is a denominator artefact and should not be read as method bias. $L_{\text{true}}$
+uses $f_l^{\text{aff}} = 0.761$, the affine decode evaluated at theoretical HU, while $\widehat{L}$
+applies the same decode to recon HU, where the insert cores measure 0.86–0.89. A recon-minus-theory
+offset of $(-2, +2.6)$ HU at 70/150 keV, through the decode coefficients $(-0.0239, +0.0219)$, is
+$+0.10$ in $f_l$ — against $(f_l^{\text{aff}} - b_0) = 0.906$ that is $+11\,\%$. Referencing the
+truth to $f_l = 0.85$ instead divides every plotted ratio by 1.098 and gives $m=0$ at
+0.855 / 0.960 / 0.971 / 0.966 and $m=8$ at 1.070 / 1.076 / 1.069 / 1.010. The $-10.5\,\%$
+composition bias of the affine decode ($0.761$ vs the true $0.85$) is the same fact seen from the
+other side, and it is common to both curves.
+
+The $r = 4$ mm curve's wiggle is noise, not a trend. Per-pixel standard deviation of
+$\hat f_l^{\text{aff}} - b$ over muscle is 0.325, so the standard error of the sum over the annulus
+between $m = 8$ and $m = 16$ is 5.3 mm², which is 11.6 % of $L_{\text{true}}$ at $r = 4$ mm but
+1.6 % at $r = 12$ mm. That is the whole difference between the swinging blue curve and the flat
+pink one.
+
+![Excess lipid recovered as a fraction of truth. Left: against object radius, at margin 0 (naive
+object extent, red) and margin 8 recon-px (integrated, green). Right: against integration margin,
+one line per radius, dotted line at the shipped margin 8. Both panels come from the same four scans
+and the same estimator. The over-unity level is a denominator effect (truth referenced to the
+affine decode's 0.761 rather than the true 0.85); the result is the *shape* — flat for the
+integrated measure, falling for the naive one as the object approaches the PSF
+width.](assets/fig6_integrated_hu.png)
 
 ---
 
 ## 6. Validation against truth
 
-All metrics use the **129 held-out test ROIs** (§4), disjoint from the 52 calibration cores. Point
-accuracy is the per-voxel decode averaged over each eroded core; agreement is Lin's concordance
-correlation coefficient (CCC), which penalises both scatter and any departure from the identity
-line (unlike Pearson $r$):
+All metrics use the **129 held-out test ROIs** (§4), disjoint from the 52 calibration cores. This is
+the result the rest of the document exists to support:
+
+![Recovered versus true volume fractions for the delivered estimator, over the 129 held-out ROIs
+(65 circular, blue; 64 sector, orange). Error bars are the standard error of the ROI mean from the
+raw decode with n_eff = N/2.1 for the ρ = 0.79 inter-energy correlation — not the standard deviation
+of the TV'd map, which TV shrinks without making the mean any more certain. The sector set, whose
+boundary geometry never entered the calibration, lies on the same line as the circular
+set.](assets/fig5_scatter.png)
+
+Point accuracy is the per-voxel decode averaged over each eroded core; agreement is Lin's
+concordance correlation coefficient (CCC), which penalises both scatter and any departure from the
+identity line (unlike Pearson $r$):
 
 $$
 \text{CCC} = \frac{2\,s_{tp}}{s_t^2 + s_p^2 + (\bar t - \bar p)^2} .
+\qquad\qquad (20)
 $$
 
 | fraction | CCC | slope | RMSE | $R^2$ |
@@ -634,37 +675,39 @@ All three exceed the pre-registered $\text{CCC} > 0.9$ target, with slopes withi
 predicts.
 
 The table scores the **raw per-voxel decode pooled over each eroded core**. The *delivered*
-estimator — the same decode after the σ_f-weighted Huber-TV and simplex projection of §5.4 — scores
+estimator — the same decode after the σ_f-weighted Huber-TV and simplex projection of (17)–(18) — scores
 slightly worse at the ROI level (CCC 0.994 / 0.995 / 0.997, RMSE 0.028 / 0.024 / 0.007), which is
 the §5.3 Jensen effect: any one-sided projection buys a feasible picture with a little ROI
 accuracy. Both are reported because they answer different questions — the table is how faithful the
 surface is, the figure is what ships.
 
-![Recovered versus true volume fractions for the delivered estimator, over the 129 held-out test
-ROIs (65 circular, blue; 64 sector, orange). Error bars are the standard error of the ROI mean
-computed from the raw decode with n_eff = N/2.1 to account for the ρ = 0.79 inter-energy noise
-correlation — not the standard deviation of the TV'd map, which TV shrinks without making the mean
-any more certain. Slopes are within 5 % of unity for all three fractions and the sector set, whose
-boundary geometry never entered the calibration, lies on the same line as the circular
-set.](assets/fig5_scatter.png)
-
 Pooled-ROI $f_l$ CCC equals the per-voxel $f_l$ CCC to three digits (0.997), confirming the pooling
 in §5.4 is not what carries the accuracy here — the surface itself is faithful; pooling is insurance
 for the map, and essential only for $f_p$.
+
+A scatter plot hides *where* the error sits. Mapping it shows that it is almost entirely at
+boundaries: the interiors are near-white in both phantoms, and the error lights up along every rod
+and wedge edge, which is the partial-volume effect of §5.5 seen in two dimensions. This is the
+result that matters for pericoronary fat, where the measurand is a thin layer and the boundary
+fraction of the ROI is large.
+
+![Circular phantom: true, recovered, and error for $f_w$ / $f_l$ / $f_p$. Fractions on a fixed jet
+0–1 scale, error on a symmetric blue–white–red scale. Interior error is small and unstructured;
+the rims carry it.](assets/fig8_gt_rec_error_circular.png)
+
+![Sector phantom, same layout. The wedge boundaries — which the calibration never saw — are where
+the error concentrates, while each wedge interior stays near zero. $f_p$ error is uniformly small
+because its range is narrow, not because it is easy (§3).](assets/fig9_gt_rec_error_sector.png)
 
 ### 6.1 Can it see 5 HU? — the detectability calculation
 
 Healthy and diseased pericoronary fat differ by only about **5 HU** in attenuation — the perivascular
 fat attenuation index (FAI) of Antonopoulos *et al.*, *Sci Transl Med* **9**, eaal2658 (2017). That
-is the whole clinical margin, so the question is not whether the decode is accurate in the abstract
-but whether 5 HU survives this method's own error. Everything below is arithmetic on numbers already
-measured above.
+is the whole clinical margin. Does it survive this method's own error?
 
-The FAI mechanism also tells us *which way* the composition moves, which is what makes the
-conversion below legitimate rather than a guess: inflammation suppresses adipocyte lipid
-accumulation, so inflamed perivascular fat holds relatively less lipid and more aqueous phase. That
-is a displacement along the water–lipid axis — exactly the coordinate this decomposition measures
-directly, and the reason a W/L/P readout is more than a re-parameterisation of the FAI.
+Inflammation suppresses adipocyte lipid accumulation, so inflamed fat holds less lipid and more
+aqueous phase — a displacement in the composition triangle, which is the coordinate this
+decomposition measures directly.
 
 **Known.**
 
@@ -680,30 +723,29 @@ directly, and the reason a W/L/P readout is more than a re-parameterisation of t
 and how it compares with 5 HU.
 
 **Assumptions.** (i) The composition shift is small enough that the decode is locally affine — it is,
-by §2.2. (ii) The ROI is large enough that its mean is the reported quantity. (iii) The 129-ROI RMSE
+by (3). (ii) The ROI is large enough that its mean is the reported quantity. (iii) The 129-ROI RMSE
 transfers to pericoronary fat, which §8 does not guarantee. Note what is *not* assumed: $f_p$ is
-free. Fixing it would be the two-material model, and the point of this decomposition is that
-inflammation is not obliged to leave protein alone.
+free. Fixing it is the two-material model (Step 3b).
 
 ---
 
 **Step 1 — the effect is a vector, not a scalar.** With $f_w = 1 - f_l - f_p$ eliminated, the
-mixture rule of §2.2 gives the HU at either energy as a linear form in the two free fractions:
+mixture rule (3) gives the HU at either energy as a linear form in the two free fractions:
 
 $$
 \Delta\mathrm{HU}_E \;=\; \Delta f_l\,\bigl(p_l - p_w\bigr)_E \;+\; \Delta f_p\,\bigl(p_p - p_w\bigr)_E ,
+\qquad\qquad (21)
 $$
 
 and at 70 keV, with $p_w = 0$, $p_l = -111.7$, $p_p = +270.6$ HU (§7),
 
 $$
 \Delta\mathrm{HU}_{70} \;=\; -111.7\,\Delta f_l \;+\; 270.6\,\Delta f_p .
+\qquad\qquad (22)
 $$
 
-*Why:* a composition change is a displacement in the 2-simplex with two degrees of freedom, and HU
-is one linear functional of it — so a single HU number cannot recover the displacement. *How:*
-substitute the constraint and read off the two levers. **Protein is the stiffer lever by 270.6/111.7
-= 2.4×**: one volume-percent of protein moves HU 2.4× as far as one volume-percent of lipid.
+**Protein is the stiffer lever by 270.6/111.7 = 2.4×**: one volume-percent of protein moves HU 2.4×
+as far as one volume-percent of lipid.
 
 **Step 1a — the 5 HU is a 120 kVp number; the levers are 70 keV.** The FAI is read off a
 single-energy 120 kVp CCTA, so the effect and the levers live on different scales and the conversion
@@ -725,32 +767,30 @@ $$
 \Delta f_l \;=\; \frac{5}{-111.7} \;=\; -0.0448 ,
 \qquad
 \Delta f_p \;=\; \frac{5}{270.6} \;=\; +0.0185 .
+\qquad\qquad (23)
 $$
 
-*Why:* these bracket the physiology — losing 4.5 volume-percent lipid and gaining 1.85
-volume-percent protein raise the FAI by the identical 5 HU. *How:* divide by each lever. Both signs
-are correct for inflammation (adipocytes shrink: less triglyceride, more protein-bearing cytoplasm),
-so the real shift is a **mixture of the two, and both push HU the same way**.
+Losing 4.5 volume-percent lipid and gaining 1.85 volume-percent protein raise the FAI by the
+identical 5 HU. Both signs are correct for inflammation — adipocytes shrink, so less triglyceride
+and more protein-bearing cytoplasm — so the real shift is a **mixture of the two, and both push HU
+the same way**.
 
 **Step 2 — one detection limit per axis, in HU.** Push each fraction's region-level error through
 its own lever:
 
 $$
 \delta_{\mathrm{HU}}^{(l)} = \operatorname{RMSE}(f_l)\,\bigl|p_l - p_w\bigr| = 0.024 \times 111.7 = 2.7\ \mathrm{HU},
+\qquad\qquad (24)
 $$
 $$
 \delta_{\mathrm{HU}}^{(p)} = \operatorname{RMSE}(f_p)\,\bigl|p_p - p_w\bigr| = 0.007 \times 270.6 = 1.9\ \mathrm{HU}.
+\qquad\qquad (25)
 $$
 
-*Why:* an error in fraction becomes an error in HU through the same lever that carried the signal,
-so this puts method and effect in one unit. *How:* multiply each RMSE by its lever. The protein axis
-has the **smaller** HU detection limit despite protein being the harder fraction in relative terms —
-its lever is 2.4× longer, which more than repays its narrower range.
-
-Read the direction of these correctly: a detection limit is the **smallest** change that can be
-told apart from the method's own error, not the largest it can measure. "2.7 HU on the lipid axis"
-means a shift under 2.7 HU is indistinguishable from error; there is no upper bound, and larger
-shifts are easier, not harder.
+The protein axis has the **smaller** HU detection limit despite protein being the harder fraction in
+relative terms — its lever is 2.4× longer, which more than repays its narrower range. A detection
+limit is the *smallest* resolvable change, not the largest: a shift under 2.7 HU is
+indistinguishable from error, and larger shifts are easier.
 
 **Step 3 — the margin, and its worst direction.** Along each pure axis the signal-to-noise ratio of
 the measurement is
@@ -759,6 +799,7 @@ $$
 S_l = \frac{5}{2.7} = 1.9 ,
 \qquad
 S_p = \frac{5}{1.9} = 2.6 .
+\qquad\qquad (26)
 $$
 
 A real shift is a mixture. If a fraction $\alpha$ of the 5 HU is carried by lipid and $1-\alpha$ by
@@ -769,17 +810,14 @@ $$
 \frac{1}{S_{\min}^{2}} = \frac{1}{S_l^{2}} + \frac{1}{S_p^{2}}
 \qquad\Longrightarrow\qquad
 S_{\min} = \frac{S_l S_p}{\sqrt{S_l^2 + S_p^2}} = \frac{1.9 \times 2.6}{\sqrt{1.9^2+2.6^2}} = 1.5 .
+\qquad\qquad (27)
 $$
 
-*Why:* splitting a fixed HU budget across two channels drops each component below its own threshold,
-and quadrature does not fully repay the loss — so the mixed direction, not either pure one, is the
-hard case. *How:* differentiate and substitute; the reciprocals add in quadrature. **The margin is
-1.5–2.6× depending on which way the composition actually moves, and 1.5× is the number to quote.**
-Detectable, but with well under 2× headroom in the worst direction — not the comfortable margin
-"every ROI is under 5 HU" suggests.
+Splitting a fixed HU budget across two channels drops each component below its own threshold, and
+quadrature does not repay the loss, so the mixed direction is the hard case. **The margin is
+1.5–2.6× depending on which way the composition moves, and 1.5× is the number to quote.**
 
-**Step 3b — what the FAI cannot do, and this can.** Steps 1b and 2 together are the argument for
-running three materials instead of two. The displacements
+**Step 3b — what the FAI cannot do, and this can.** The displacements
 
 $$
 (\Delta f_l, \Delta f_p) = (-0.0448,\ 0)
@@ -807,20 +845,17 @@ n \;\ge\; 2\left(\frac{1.96}{S}\right)^{2}
 2\,(1.96/2.6)^2 = 1.1 & \text{pure protein } (S_p)\\
 2\,(1.96/1.5)^2 = 3.3 & \text{worst mixture } (S_{\min})
 \end{cases}
+\qquad\qquad (28)
 $$
 
-*Why:* the difference of two means carries $\sqrt2$ times the single-mean error, and 1.96 is the
-two-sided 95 % normal quantile. *How:* solve for $n$ and round up. **$n \ge 4$ ROIs per group in the
-worst direction** (2 in the best) — so a *cohort* comparison is comfortable, while a
-*single-patient* call at 95 % confidence is not: a single ROI gives $S_{\min} = 1.5\sigma$, which is
-$p = 0.13$ two-sided.
+since the difference of two means carries $\sqrt2$ times the single-mean error. **$n \ge 4$ ROIs per
+group in the worst direction** (2 in the best): a *cohort* comparison is comfortable, a
+*single-patient* call is not, since one ROI gives $S_{\min} = 1.5\sigma$, or $p = 0.13$ two-sided.
 
-**Which threshold applies.** $k = 1.96$ is the 95 % two-sided normal quantile for comparing measured
-numbers with known error bars at a known location — hypothesis testing. The familiar Rose criterion
-$\mathrm{SNR} \ge 3$–5 is a *different* task: visual detection of a lesion of unknown location by a
-human observer, where the search over possible positions costs extra confidence. Nothing here is
-searched or looked at by eye, so Rose is the wrong bar and applying it would be over-conservative.
-It is worth knowing the price if a reviewer insists:
+**Which threshold applies.** $k = 1.96$ is the 95 % two-sided quantile for hypothesis testing on
+known error bars at a known location. The Rose criterion $\mathrm{SNR} \ge 3$–5 covers a different
+task — visual search for a lesion of unknown position — so it is the wrong bar here, but its price
+is:
 
 | criterion | task | $n$ per group |
 |---|---|---|
@@ -836,6 +871,7 @@ A \;=\; \pi\left[\left(\tfrac{3d}{2}\right)^{2} - \left(\tfrac{d}{2}\right)^{2}\
 \;=\; 2\pi d^{2},
 \qquad
 V \;=\; 2\pi d^{2} L .
+\qquad\qquad (29)
 $$
 
 For a proximal RCA, $d = 3.5$ mm and $L = 40$ mm give $V = 2\pi(3.5)^2(40) = 3079\ \mathrm{mm^3}$.
@@ -846,6 +882,7 @@ $$
 N \;=\; \eta\,\frac{V}{v} \;=\; 0.6 \times \frac{3079}{0.08} \;=\; 23\,100,
 \qquad
 n_{\text{eff}} \;=\; \frac{N}{2.1} \;=\; 11\,000 .
+\qquad\qquad (30)
 $$
 
 The standard error of the ROI mean on each fraction, and its HU equivalent through that fraction's
@@ -854,16 +891,17 @@ lever, using the per-voxel $\sigma_{f_l} = 0.196$ and $\sigma_{f_p} = 0.046$ of 
 $$
 \operatorname{SEM}(f_l) = \frac{0.196}{\sqrt{11\,000}} = 0.0019
 \;\Rightarrow\; 0.0019 \times 111.7 = 0.21\ \mathrm{HU},
+\qquad\qquad (31)
 $$
 $$
 \operatorname{SEM}(f_p) = \frac{0.046}{\sqrt{11\,000}} = 0.00044
 \;\Rightarrow\; 0.00044 \times 270.6 = 0.12\ \mathrm{HU}.
+\qquad\qquad (32)
 $$
 
-*Why:* per-voxel speckle averages down as $\sqrt{n_{\text{eff}}}$, and $n_{\text{eff}} < N$ only
-because the two energies share noise ($\rho = 0.79$). *How:* propagate and convert. Combining these
-two the same way as Step 3 gives a noise-limited worst-direction ratio of $S^{\text{noise}}_{\min} =
-21$, i.e. a **noise-only detection limit of $5/21 = 0.24$ HU**.
+Per-voxel speckle averages down as $\sqrt{n_{\text{eff}}}$, with $n_{\text{eff}} < N$ only because
+the two energies share noise. Combining the two axes as in Step 3 gives
+$S^{\text{noise}}_{\min} = 21$, a **noise-only detection limit of $5/21 = 0.24$ HU**.
 
 **Step 6 — the verdict.** Put the worst-direction limits side by side. Total error gives
 $5/S_{\min} = 5/1.5 = 3.3$ HU; noise alone gives 0.24 HU:
@@ -876,6 +914,7 @@ $$
 \underbrace{5\ \mathrm{HU}}_{\text{effect}},
 \qquad
 \frac{3.3}{0.24} = 14 .
+\qquad\qquad (33)
 $$
 
 Noise contributes **14× less** than the total error. Averaging a realistic pericoronary ROI has
@@ -888,11 +927,11 @@ improvement of 2× buys 0.1 HU and changes nothing, while removing the −10.5 %
 **Why the round-trip HU residual is the wrong metric.** Mapping each ROI's decode back to HU and
 comparing against the truth-composition HU gives a much flattering-looking number — mean 0.98 HU at
 70 keV and 0.68 HU at 150 keV, with 100 % of ROIs under 5 HU. That statistic is **not** the
-detection limit, because it lives in HU space: the triangle of §3 is a near-collinear sliver
+detection limit, because it lives in HU space: the triangle of (7) is a near-collinear sliver
 ($\operatorname{cond} G = 16.9$), so a composition error along its degenerate direction changes the
-predicted HU almost not at all. The round-trip residual is blind in exactly the direction the method
-is weakest, and it will stay small even when $f_l$ is wrong. Detectability must be computed in the
-fraction domain and converted to HU at the end — Steps 1–3 — not measured as an HU residual.
+predicted HU almost not at all. It stays small even when $f_l$ is wrong. Detectability must be
+computed in the fraction domain and converted to HU at the end (Steps 1–3), not measured as an HU
+residual.
 
 ---
 
@@ -931,13 +970,13 @@ against a Gaussian data term, minimised by Newton iteration, with a `PRIOR_MODE`
 $\{$free, broad, gamma, fwl-closed$\}$. **That solver is scaffolded but never executed.** The
 notebook builds the prior object (`bayes_prior_broad`, from the §4 KDE draws) but nothing consumes
 it: there is no Newton step, no posterior, no `PRIOR_MODE` branch on the delivered path. What
-actually produces every number in this document is the **empirical calibration surface** of §5.1 —
+actually produces every number in this document is the **empirical calibration surface** of (9)–(10) —
 a discriminative least-squares map from HU to fractions — cleaned by the §5.4 Huber-TV. The prior's
 only surviving role is *generative*: it draws the physiological calibration compositions (§4). A
 reader should treat the WLP estimator as **calibration-based, not Bayesian**; the prior scaffolding
 is latent and would need to be wired in and re-validated before any MAP claim could be made.
 
-**The map's regulariser is TV, not a learned prior.** The §5.4 coupling is a hand-set Huber-TV
+**The map's regulariser is TV, not a learned prior.** The coupling of (17) is a hand-set Huber-TV
 ($\lambda, \varepsilon$ fixed, not fit), so the "prior" on the map is a smoothness assumption, not
 the adipose distribution. It is deliberately boundary-agnostic; the ground-truth-pooled comparison
 map (figs 3–4) is shown only to quantify what a boundary would buy, not as a deliverable.
@@ -981,7 +1020,7 @@ up to version 26).
 The endpoints and $\operatorname{cond}(G)$ come from NIST XCOM cross-sections via
 `XrayAttenuation.jl` **v0.3.2** — `linear_attenuation_coeff(material, E·keV)` is a log-log
 interpolation of the per-element total-with-coherent mass-attenuation table, combined by mass
-fraction and scaled by density, exactly as §2.1–2.2 use it. Endpoints, all fit coefficients, the
+fraction and scaled by density, exactly as (1) and (4) use it. Endpoints, all fit coefficients, the
 worked decode, the σ_f propagation, the detectability floor, and the integrated-HU series in this
 document were regenerated directly from these four caches; the diagnostic line the notebook prints
 on load,
