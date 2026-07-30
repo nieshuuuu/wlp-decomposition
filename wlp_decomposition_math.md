@@ -158,6 +158,12 @@ $f_p \approx -0.05$ (just outside the triangle, below the water–lipid edge). A
 renders the ring as ~0.8 lipid, bright but not saturated; only the *scored* inserts (calibration,
 circular, sector) carry known $(f_w, f_l, f_p)$ and enter any accuracy number.
 
+![The QRM-thorax phantom, mid-slice of the 512² recon grid, in phantom-frame mm (anterior up).
+Left: the calibration/test layout — 13 hex-packed ø19.9 mm inserts inside the r = 55 mm heart
+cavity. Right: the held-out sector layout — 16 wedges at r ≤ 50 mm, which shares no boundary
+geometry with the circular set and so tests the decode on edges it was never fit
+to.](assets/fig_phantom_labels.png)
+
 ### 2.4 Simulate → basis → VMI
 
 Each acquisition (the notebook's `run_acq`) is one dual-kVp EICT simulation reconstructed to two
@@ -393,6 +399,13 @@ $$
 which the map step (§5.4) propagates into a per-voxel fraction uncertainty, and which also defines
 the metric for the out-of-triangle handling next.
 
+![The noise model is measured, not assumed. Left: the per-rod standard deviation σ(HU) at each VMI
+energy, with the fitted convex quadratic — σ₇₀ ≈ 9.7 HU is ≈ 4× σ₁₅₀ ≈ 2.2 HU, and both are flat
+in HU over the soft-tissue range, so a single σ per energy is already a good description. Right:
+the joint residual scatter of the two channels, ρ = 0.79 — the two VMIs are synthesized from one
+basis pair, so their noise is shared, and Σ is a tilted ellipse rather than a
+circle.](assets/fig2_noise.png)
+
 ### 5.3 Points outside the triangle — the noise-ellipse MLE
 
 §2.2 says a noiseless mixture lands *inside* the triangle $\{f_w, f_l, f_p \ge 0\}$. A noisy
@@ -535,16 +548,21 @@ $|\Delta f_l| = 0.0006$; ROI $f_l$ CCC $0.975$ Euclidean vs $0.977$ Mahalanobis)
 noise-ellipse metric earns its place only at the pooled ROI decode (§5.3), where the quantity is a
 single mean; on a *per-voxel* map any one-sided clamp already trades ROI accuracy for a feasible
 picture (unclamped ROI $f_l$ CCC $0.992$ → clamped $0.975$, the Jensen effect of §5.3 acting
-pixelwise), and the gentler Euclidean clamp is the safer default. `fig_map_clamp.png` shows the
-three side by side.
+pixelwise), and the gentler Euclidean clamp is the safer default.
 
-![Delivered f_l map over the heart under three per-voxel clamp strategies. Left: true rod
-fractions. The unclamped raw decode has the best ROI f_l CCC (0.992) but 83 % of its voxels are
-individually infeasible; the TV + Euclidean clamp (current delivered map) and the TV + Mahalanobis
-clamp are visually indistinguishable (CCC 0.975 vs 0.977), and both trade ROI accuracy for a
-feasible picture. The fat ring stays bright in all three; under a per-voxel Mahalanobis clamp it
-would saturate to pure lipid, which is why the map keeps the Euclidean
-projection.](assets/fig_map_clamp.png)
+![The delivered map: per-voxel decode plus σ_f-weighted Huber-TV (λ = 12.12, simplex once),
+boundary-agnostic — only lung and bone are HU-gated out, no material boundary is used anywhere.
+Left to right: the 150 keV VMI, then $f_w$, $f_l$, $f_p$ on a fixed 0–1 scale. The check to make is
+the fat ring: it reads ≈ 0.8 lipid, bright but *not* saturated, which is the correct decomposition
+of ICRU-44 adipose (§2.3) rather than pure triglyceride. Muscle reads high water, and $f_p$ stays
+low and flat everywhere, as the narrow protein range of §6 requires.](assets/fig3_delivered_map.png)
+
+![Why the map is scored without a ground-truth boundary. Left: the true rod fractions. Middle: the
+delivered map — per-voxel decode plus σ_f-weighted Huber-TV, which uses no boundary and therefore
+keeps both the real within-rod texture and the partial-volume edges. Right: the same data pooled
+inside the ground-truth rod boundary, which looks far cleaner precisely because it has been handed
+the one thing real pericoronary fat never provides. The middle panel is the honest deliverable; the
+right panel is the number a boundary-aware method would report.](assets/fig4_honest_vs_pooled.png)
 
 ### 5.5 Integrated-HU — total lipid without a boundary
 
@@ -583,6 +601,14 @@ from the geometric partial-volume effect. The message of fig 6 is the *shape* �
 falls away for small objects while the integrated curve stays roughly flat — not the exact
 percentage, which depends on the skirt rule.
 
+![Conservation of lipid recovers what partial volume hides. Left: recovered/true excess lipid
+against fat-object radius — the naive object-extent measure (red) falls below unity as the object
+shrinks toward the PSF width, because the smeared skirt is outside the segmented extent, while the
+integrated-HU measure (green) stays flat. Right: the same ratio against integration margin; beyond
+≈ 8 recon-px the curve plateaus for every radius, which is what a conserved quantity should do.
+Both measures sit above unity by 11–18 % from the fixed-skirt rule and a common −10.5 % composition
+bias, so the claim here is the *shape*, not the absolute level.](assets/fig6_integrated_hu.png)
+
 ---
 
 ## 6. Validation against truth
@@ -607,22 +633,266 @@ All three exceed the pre-registered $\text{CCC} > 0.9$ target, with slopes withi
 ($[0, 0.30]$); relative to its range it is the hardest fraction, exactly as the sliver of §3
 predicts.
 
-**Detectability.** Can a real composition change be seen above noise? Map each ROI's decode back to
-HU via the endpoints and compare against the truth-composition HU; the discrepancy is the noise
-floor of the method in HU:
+The table scores the **raw per-voxel decode pooled over each eroded core**. The *delivered*
+estimator — the same decode after the σ_f-weighted Huber-TV and simplex projection of §5.4 — scores
+slightly worse at the ROI level (CCC 0.994 / 0.995 / 0.997, RMSE 0.028 / 0.024 / 0.007), which is
+the §5.3 Jensen effect: any one-sided projection buys a feasible picture with a little ROI
+accuracy. Both are reported because they answer different questions — the table is how faithful the
+surface is, the figure is what ships.
+
+![Recovered versus true volume fractions for the delivered estimator, over the 129 held-out test
+ROIs (65 circular, blue; 64 sector, orange). Error bars are the standard error of the ROI mean
+computed from the raw decode with n_eff = N/2.1 to account for the ρ = 0.79 inter-energy noise
+correlation — not the standard deviation of the TV'd map, which TV shrinks without making the mean
+any more certain. Slopes are within 5 % of unity for all three fractions and the sector set, whose
+boundary geometry never entered the calibration, lies on the same line as the circular
+set.](assets/fig5_scatter.png)
+
+Pooled-ROI $f_l$ CCC equals the per-voxel $f_l$ CCC to three digits (0.997), confirming the pooling
+in §5.4 is not what carries the accuracy here — the surface itself is faithful; pooling is insurance
+for the map, and essential only for $f_p$.
+
+### 6.1 Can it see 5 HU? — the detectability calculation
+
+Healthy and diseased pericoronary fat differ by only about **5 HU** in attenuation — the perivascular
+fat attenuation index (FAI) of Antonopoulos *et al.*, *Sci Transl Med* **9**, eaal2658 (2017). That
+is the whole clinical margin, so the question is not whether the decode is accurate in the abstract
+but whether 5 HU survives this method's own error. Everything below is arithmetic on numbers already
+measured above.
+
+The FAI mechanism also tells us *which way* the composition moves, which is what makes the
+conversion below legitimate rather than a guess: inflammation suppresses adipocyte lipid
+accumulation, so inflamed perivascular fat holds relatively less lipid and more aqueous phase. That
+is a displacement along the water–lipid axis — exactly the coordinate this decomposition measures
+directly, and the reason a W/L/P readout is more than a re-parameterisation of the FAI.
+
+**Known.**
+
+| symbol | value | source |
+|---|---|---|
+| $\Delta\mathrm{HU}$ | 5 HU | FAI healthy-vs-diseased effect, Antonopoulos 2017 |
+| $\mathrm{HU}_w(70),\ \mathrm{HU}_l(70)$ | $0,\ -111.7$ HU | endpoints, §7 |
+| $\operatorname{RMSE}(f_l)$ | 0.024 | delivered estimator, §6 |
+| $\sigma_{f_l}$ | 0.196 | per-voxel, §5.4 worked example |
+| $n_{\text{eff}}$ | $N/2.1$ | correlated-noise effective count, §6 |
+
+**Want to know.** The smallest attenuation shift this method can resolve at the region level, in HU,
+and how it compares with 5 HU.
+
+**Assumptions.** (i) The composition shift is small enough that the decode is locally affine — it is,
+by §2.2. (ii) The ROI is large enough that its mean is the reported quantity. (iii) The 129-ROI RMSE
+transfers to pericoronary fat, which §8 does not guarantee. Note what is *not* assumed: $f_p$ is
+free. Fixing it would be the two-material model, and the point of this decomposition is that
+inflammation is not obliged to leave protein alone.
+
+---
+
+**Step 1 — the effect is a vector, not a scalar.** With $f_w = 1 - f_l - f_p$ eliminated, the
+mixture rule of §2.2 gives the HU at either energy as a linear form in the two free fractions:
 
 $$
-\text{at 150 keV}:\ \text{mean } 0.68\ \mathrm{HU},\ p_{90}=1.3,\ 100\%\ \text{of ROIs} < 5\ \mathrm{HU};
-$$
-$$
-\text{at 70 keV}:\ \text{mean } 0.98\ \mathrm{HU},\ p_{90}=2.0,\ 100\%\ \text{of ROIs} < 5\ \mathrm{HU}.
+\Delta\mathrm{HU}_E \;=\; \Delta f_l\,\bigl(p_l - p_w\bigr)_E \;+\; \Delta f_p\,\bigl(p_p - p_w\bigr)_E ,
 $$
 
-Every ROI sits under the 5 HU detectability target on both channels — a 5 HU inflammation shift
-(the pericoronary-fat use case) would clear this floor. Pooled-ROI $f_l$ CCC equals the per-voxel
-$f_l$ CCC to three digits (0.997), confirming the pooling in §5.4 is not what carries the accuracy
-here — the surface itself is faithful; pooling is insurance for the map, and essential only for
-$f_p$.
+and at 70 keV, with $p_w = 0$, $p_l = -111.7$, $p_p = +270.6$ HU (§7),
+
+$$
+\Delta\mathrm{HU}_{70} \;=\; -111.7\,\Delta f_l \;+\; 270.6\,\Delta f_p .
+$$
+
+*Why:* a composition change is a displacement in the 2-simplex with two degrees of freedom, and HU
+is one linear functional of it — so a single HU number cannot recover the displacement. *How:*
+substitute the constraint and read off the two levers. **Protein is the stiffer lever by 270.6/111.7
+= 2.4×**: one volume-percent of protein moves HU 2.4× as far as one volume-percent of lipid.
+
+**Step 1a — the 5 HU is a 120 kVp number; the levers are 70 keV.** The FAI is read off a
+single-energy 120 kVp CCTA, so the effect and the levers live on different scales and the conversion
+is only legitimate if they can be brought together. They can: after beam-hardening correction and
+water calibration, a 120 kVp beam behaves as monoenergetic at $E_{\text{eff}} = 70.0$ keV
+(`oxford_wlp_single_energy_math.md` §13), which is why the 70 keV lever is the right one to use. The
+residual disagreement at fixed $E_{\text{eff}}$ is $|{-111.69} - ({-108.86})| = 2.8$ HU, i.e.
+**2.5 %** on the lipid lever — negligible next to the margins below.
+
+The caveat is $E_{\text{eff}}$ itself, not the lever: a $\pm 5$ keV error in $E_{\text{eff}}$ moves
+$f_w$ by $\pm 0.023$ to $\pm 0.04$, which is the size of the entire effect. That error is
+**common-mode** — the same scanner and protocol image both the healthy and the diseased fat — so it
+largely cancels in a *difference* and this calculation survives. It does not cancel in an *absolute*
+composition, so $E_{\text{eff}}$ must be pinned per scanner before any absolute $f_l$ is quoted.
+
+**Step 1b — the two pure routes to 5 HU.** Setting each term alone to $+5$ HU:
+
+$$
+\Delta f_l \;=\; \frac{5}{-111.7} \;=\; -0.0448 ,
+\qquad
+\Delta f_p \;=\; \frac{5}{270.6} \;=\; +0.0185 .
+$$
+
+*Why:* these bracket the physiology — losing 4.5 volume-percent lipid and gaining 1.85
+volume-percent protein raise the FAI by the identical 5 HU. *How:* divide by each lever. Both signs
+are correct for inflammation (adipocytes shrink: less triglyceride, more protein-bearing cytoplasm),
+so the real shift is a **mixture of the two, and both push HU the same way**.
+
+**Step 2 — one detection limit per axis, in HU.** Push each fraction's region-level error through
+its own lever:
+
+$$
+\delta_{\mathrm{HU}}^{(l)} = \operatorname{RMSE}(f_l)\,\bigl|p_l - p_w\bigr| = 0.024 \times 111.7 = 2.7\ \mathrm{HU},
+$$
+$$
+\delta_{\mathrm{HU}}^{(p)} = \operatorname{RMSE}(f_p)\,\bigl|p_p - p_w\bigr| = 0.007 \times 270.6 = 1.9\ \mathrm{HU}.
+$$
+
+*Why:* an error in fraction becomes an error in HU through the same lever that carried the signal,
+so this puts method and effect in one unit. *How:* multiply each RMSE by its lever. The protein axis
+has the **smaller** HU detection limit despite protein being the harder fraction in relative terms —
+its lever is 2.4× longer, which more than repays its narrower range.
+
+Read the direction of these correctly: a detection limit is the **smallest** change that can be
+told apart from the method's own error, not the largest it can measure. "2.7 HU on the lipid axis"
+means a shift under 2.7 HU is indistinguishable from error; there is no upper bound, and larger
+shifts are easier, not harder.
+
+**Step 3 — the margin, and its worst direction.** Along each pure axis the signal-to-noise ratio of
+the measurement is
+
+$$
+S_l = \frac{5}{2.7} = 1.9 ,
+\qquad
+S_p = \frac{5}{1.9} = 2.6 .
+$$
+
+A real shift is a mixture. If a fraction $\alpha$ of the 5 HU is carried by lipid and $1-\alpha$ by
+protein, the two independent measurements combine in quadrature, $S(\alpha)^2 = (\alpha S_l)^2 +
+((1-\alpha)S_p)^2$, which is minimised at $\alpha^\star = S_p^2/(S_l^2+S_p^2) = 0.67$:
+
+$$
+\frac{1}{S_{\min}^{2}} = \frac{1}{S_l^{2}} + \frac{1}{S_p^{2}}
+\qquad\Longrightarrow\qquad
+S_{\min} = \frac{S_l S_p}{\sqrt{S_l^2 + S_p^2}} = \frac{1.9 \times 2.6}{\sqrt{1.9^2+2.6^2}} = 1.5 .
+$$
+
+*Why:* splitting a fixed HU budget across two channels drops each component below its own threshold,
+and quadrature does not fully repay the loss — so the mixed direction, not either pure one, is the
+hard case. *How:* differentiate and substitute; the reciprocals add in quadrature. **The margin is
+1.5–2.6× depending on which way the composition actually moves, and 1.5× is the number to quote.**
+Detectable, but with well under 2× headroom in the worst direction — not the comfortable margin
+"every ROI is under 5 HU" suggests.
+
+**Step 3b — what the FAI cannot do, and this can.** Steps 1b and 2 together are the argument for
+running three materials instead of two. The displacements
+
+$$
+(\Delta f_l, \Delta f_p) = (-0.0448,\ 0)
+\qquad\text{and}\qquad
+(\Delta f_l, \Delta f_p) = (0,\ +0.0185)
+$$
+
+produce the *same* 5 HU and are therefore the same FAI reading, but they are different physiology —
+one is lipid depletion, the other a protein-bearing cytoplasm fraction. A single attenuation number
+is one linear functional of a two-dimensional displacement, so it cannot separate them; it is not a
+matter of precision. The decomposition measures both coordinates, each with its own error bar
+(Step 2), which is what converts an attenuation index into a composition. **A two-material W/L fit
+does not sidestep this — it is worse:** forced to $f_p = 0$, it must absorb any true protein change
+into a spurious water/lipid shift, and by the 2.4× lever ratio it will over-report that shift by
+roughly that factor.
+
+**Step 4 — how many ROIs to separate two groups.** For two group means of $n$ ROIs each, separation
+at the 95 % level requires
+
+$$
+\frac{S}{\sqrt{2/n}} \;\ge\; 1.96
+\qquad\Longrightarrow\qquad
+n \;\ge\; 2\left(\frac{1.96}{S}\right)^{2}
+= \begin{cases}
+2\,(1.96/2.6)^2 = 1.1 & \text{pure protein } (S_p)\\
+2\,(1.96/1.5)^2 = 3.3 & \text{worst mixture } (S_{\min})
+\end{cases}
+$$
+
+*Why:* the difference of two means carries $\sqrt2$ times the single-mean error, and 1.96 is the
+two-sided 95 % normal quantile. *How:* solve for $n$ and round up. **$n \ge 4$ ROIs per group in the
+worst direction** (2 in the best) — so a *cohort* comparison is comfortable, while a
+*single-patient* call at 95 % confidence is not: a single ROI gives $S_{\min} = 1.5\sigma$, which is
+$p = 0.13$ two-sided.
+
+**Which threshold applies.** $k = 1.96$ is the 95 % two-sided normal quantile for comparing measured
+numbers with known error bars at a known location — hypothesis testing. The familiar Rose criterion
+$\mathrm{SNR} \ge 3$–5 is a *different* task: visual detection of a lesion of unknown location by a
+human observer, where the search over possible positions costs extra confidence. Nothing here is
+searched or looked at by eye, so Rose is the wrong bar and applying it would be over-conservative.
+It is worth knowing the price if a reviewer insists:
+
+| criterion | task | $n$ per group |
+|---|---|---|
+| $k = 1.96$ | 95 % two-sided, two group means | **4** |
+| $k = 3$ | Rose, conservative | 8 |
+| $k = 5$ | Rose, strict | 22 |
+
+**Step 5 — how much of that error is noise?** A pericoronary ROI is the radial fat layer of
+thickness $d$ around a vessel of diameter $d$, over a length $L$. Its area is exactly
+
+$$
+A \;=\; \pi\left[\left(\tfrac{3d}{2}\right)^{2} - \left(\tfrac{d}{2}\right)^{2}\right]
+\;=\; 2\pi d^{2},
+\qquad
+V \;=\; 2\pi d^{2} L .
+$$
+
+For a proximal RCA, $d = 3.5$ mm and $L = 40$ mm give $V = 2\pi(3.5)^2(40) = 3079\ \mathrm{mm^3}$.
+At $0.4 \times 0.4 \times 0.5\ \mathrm{mm}$ voxels ($0.08\ \mathrm{mm^3}$), and keeping the
+$\eta = 60\%$ of voxels far enough from the boundary to be partial-volume-clean (§5.5),
+
+$$
+N \;=\; \eta\,\frac{V}{v} \;=\; 0.6 \times \frac{3079}{0.08} \;=\; 23\,100,
+\qquad
+n_{\text{eff}} \;=\; \frac{N}{2.1} \;=\; 11\,000 .
+$$
+
+The standard error of the ROI mean on each fraction, and its HU equivalent through that fraction's
+lever, using the per-voxel $\sigma_{f_l} = 0.196$ and $\sigma_{f_p} = 0.046$ of §5.4:
+
+$$
+\operatorname{SEM}(f_l) = \frac{0.196}{\sqrt{11\,000}} = 0.0019
+\;\Rightarrow\; 0.0019 \times 111.7 = 0.21\ \mathrm{HU},
+$$
+$$
+\operatorname{SEM}(f_p) = \frac{0.046}{\sqrt{11\,000}} = 0.00044
+\;\Rightarrow\; 0.00044 \times 270.6 = 0.12\ \mathrm{HU}.
+$$
+
+*Why:* per-voxel speckle averages down as $\sqrt{n_{\text{eff}}}$, and $n_{\text{eff}} < N$ only
+because the two energies share noise ($\rho = 0.79$). *How:* propagate and convert. Combining these
+two the same way as Step 3 gives a noise-limited worst-direction ratio of $S^{\text{noise}}_{\min} =
+21$, i.e. a **noise-only detection limit of $5/21 = 0.24$ HU**.
+
+**Step 6 — the verdict.** Put the worst-direction limits side by side. Total error gives
+$5/S_{\min} = 5/1.5 = 3.3$ HU; noise alone gives 0.24 HU:
+
+$$
+\underbrace{0.24\ \mathrm{HU}}_{\text{noise only}}
+\;\ll\;
+\underbrace{3.3\ \mathrm{HU}}_{\text{total error}}
+\;<\;
+\underbrace{5\ \mathrm{HU}}_{\text{effect}},
+\qquad
+\frac{3.3}{0.24} = 14 .
+$$
+
+Noise contributes **14× less** than the total error. Averaging a realistic pericoronary ROI has
+already driven photon noise to 0.24 HU, a factor of 21 below the effect — so **noise is not what
+limits 5 HU detection; systematic accuracy is.** The 3.3 HU floor is calibration-surface error and
+partial-volume bias (§5.5), and it is the only term worth attacking. Concretely: a denoising
+improvement of 2× buys 0.1 HU and changes nothing, while removing the −10.5 % composition bias of
+§5.5 would move the floor by more than the entire noise budget.
+
+**Why the round-trip HU residual is the wrong metric.** Mapping each ROI's decode back to HU and
+comparing against the truth-composition HU gives a much flattering-looking number — mean 0.98 HU at
+70 keV and 0.68 HU at 150 keV, with 100 % of ROIs under 5 HU. That statistic is **not** the
+detection limit, because it lives in HU space: the triangle of §3 is a near-collinear sliver
+($\operatorname{cond} G = 16.9$), so a composition error along its degenerate direction changes the
+predicted HU almost not at all. The round-trip residual is blind in exactly the direction the method
+is weakest, and it will stay small even when $f_l$ is wrong. Detectability must be computed in the
+fraction domain and converted to HU at the end — Steps 1–3 — not measured as an HU residual.
 
 ---
 
