@@ -68,6 +68,21 @@ statistics. See §6.1 of the math document for the calculation.
   acquisition. The *recipe* transfers; the constants must be re-measured per system, as in the
   sibling [`calibration_comparison.md`](https://github.com/MolloiLab/wl-noise-aware-mmd).
 
+## Layout
+
+```
+wlp_decomposition.jl        the standalone notebook — no include(), no input data files
+wlp_decomposition_math.md   its derivation, authoritative
+wlp_model_70_150.toml       the fitted model card the notebook writes
+assets/  data/  docs/
+pcat/                       downstream: applies the model card to pericoronary fat
+```
+
+The notebook is self-contained: it includes nothing and reads no input file. Everything under
+`pcat/` is a *consumer* of `wlp_model_70_150.toml`, not part of the decomposition — it applies the
+fitted reader to pericoronary adipose tissue and has its own outputs in `pcat/pcat_ct/`. Nothing in
+`pcat/` needs to run for the notebook to reproduce every number in this README.
+
 ## Run
 
 ```julia

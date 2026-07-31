@@ -961,7 +961,7 @@ constants are kept in the code for reference but are not the deployed pair.
 ## 8. What the code does *not* do — and where numbers stop transferring
 
 Honesty for publication requires stating the gap between the design plan
-(`create-a-new-project-immutable-brooks.md`) and the delivered notebook, because they diverged
+(`docs/create-a-new-project-immutable-brooks.md`) and the delivered notebook, because they diverged
 during revision.
 
 **The Bayesian MAP in the plan is not the estimator that runs.** The plan specifies a maximum a

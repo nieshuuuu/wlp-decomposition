@@ -1,4 +1,4 @@
-# The math of `pcat_deconv_design.jl`
+# The math of `pcat/pcat_deconv_design.jl`
 
 How the Oxford clinical FAI HU gradient becomes the phantom's tissue-domain water/lipid/protein
 composition. Single source of truth for the algorithm; the script is the implementation.
@@ -421,7 +421,7 @@ from before that date differs from the current one by up to `0.267` pp (healthy)
 with `ΔH = H_i - y_i`, so it is largest exactly where the monotone model cuts across the clinical
 curve's non-monotone bump (§9).
 
-**Cost of the reorder.** `pcat_deconv_design.jl` now `include`s the adipose sampler from
+**Cost of the reorder.** `pcat/pcat_deconv_design.jl` now `include`s the adipose sampler from
 `wl-noise-aware-mmd/src/` — the sampler's canonical home, included rather than copied, so exactly one
 implementation of it continues to exist. In exchange the script **no longer reads the SMB share at
 all**: its inputs are now the local `oxford_fai_gradient.csv` and this repository's own
@@ -447,7 +447,7 @@ be a ray from it. Nothing in the current pipeline uses such a ray.
 This procedure is **not** taken from a published method. It is a design step written for this
 phantom: the parametric-forward-model-instead-of-inverse-filter idea is standard practice in
 ill-posed inversion, but the specific three-parameter profile (A2) and the self-consistency
-criterion of §0 are local choices made in `pcat_deconv_design.jl`.
+criterion of §0 are local choices made in `pcat/pcat_deconv_design.jl`.
 
 The *inputs* have sources — the clinical FAI gradient is Oxford-style perivascular HU versus
 distance, the endpoints come from NIST triglyceride and Woodard & White 1986 protein, and the
